@@ -63,7 +63,7 @@ export type FrameError = {
   request: number
   error: string
 }
-export type Invoke = { type: "invoke"; id: string; action: string; input?: unknown }
+export type Invoke = { type: "invoke"; id: string; path: string; action: string; input?: unknown }
 export type Ai = { type: "veritly.data.ai"; path: string; issues: string[] }
 export type Outgoing = Ready | Loaded | Flushed | FrameResult | FrameError | Invoke | Ai
 

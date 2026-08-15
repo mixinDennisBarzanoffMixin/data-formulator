@@ -6,6 +6,7 @@ from pathlib import Path
 import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
+from openpyxl import Workbook as ExcelWorkbook
 
 from data_formulator.veritly_recipe import RecipeError, execute
 from data_formulator.veritly_worker import app
@@ -225,6 +226,65 @@ def test_execute_endpoint_streams_manifest_then_typed_ndjson(tmp_path: Path, mon
     assert lines[1]["Amount"] == 10
     assert uuid_like(lines[1]["_veritly_id"])
     assert len(response.headers["X-Veritly-Recipe-Sha256"]) == 64
+
+
+def test_locate_endpoint_streams_physical_rows_and_skips_side_clutter(monkeypatch):
+    book = ExcelWorkbook()
+    sheet = book.active
+    sheet.title = "Rows"
+    sheet.append(["Customer", "Veritly ID", "Side"])
+    sheet.append(["Ada", "20e7a402-6567-5d3e-949f-b5cfe6a46ab2", None])
+    sheet.append([None, None, "unrelated"])
+    sheet.append(["Grace", None, None])
+    data = io.BytesIO()
+    book.save(data)
+    monkeypatch.setenv("DATA_WORKER_TOKEN", "secret")
+    response = app.test_client().post(
+        "/locate",
+        data={
+            "selection": json.dumps({"sheet": "Rows", "header": 1, "start": 2, "end": 4, "left": 1, "right": 2}),
+            "identity": "Veritly ID",
+            "file": (io.BytesIO(data.getvalue()), "rows.xlsx"),
+        },
+        headers={"x-veritly-service-token": "secret"},
+        content_type="multipart/form-data",
+    )
+    assert response.status_code == 200
+    lines = [json.loads(line) for line in response.get_data(as_text=True).splitlines()]
+    assert lines == [
+        {"$veritly": {"columns": ["Customer", "Veritly ID"]}},
+        {"row": 1, "id": "20e7a402-6567-5d3e-949f-b5cfe6a46ab2"},
+        {"row": 3, "id": None},
+    ]
+
+
+def test_metrics_endpoint_is_public_and_prometheus_compatible():
+    response = app.test_client().get("/metrics")
+    assert response.status_code == 200
+    assert response.content_type.startswith("text/plain")
+    assert "veritly_data_worker_up 1" in response.get_data(as_text=True)
+
+
+@pytest.mark.parametrize("count", [100_000, 1_000_000])
+def test_large_transaction_fixtures_preserve_every_physical_row(tmp_path: Path, count: int):
+    raw = tmp_path / f"transactions-{count}.parquet"
+    pq.write_table(
+        pa.table({
+            "Transaction ID": pa.array(range(count), type=pa.int64()),
+            "Amount": pa.array(range(count), type=pa.int64()),
+        }),
+        raw,
+        compression="zstd",
+    )
+    commands = [
+        source("source", "raw"),
+        flow("key", "key", "raw", "keyed", ["source"], key={"strategy": "existing", "columns": ["Transaction ID"]}),
+        output("final", "keyed", ["key"], keys=["Transaction ID"]),
+    ]
+    result = run(tmp_path / f"scale-{count}", {"raw": raw}, commands, "final")
+    assert result.manifest["rows"] == count
+    assert result.manifest["rowPolicy"] == "preserved"
+    assert pq.ParquetFile(result.path).metadata.num_rows == count
 
 
 def uuid_like(value: object) -> bool:

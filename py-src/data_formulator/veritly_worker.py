@@ -319,6 +319,16 @@ def livez():
     return jsonify({"ok": True})
 
 
+@app.get("/metrics")
+def metrics():
+    return Response(
+        "# HELP veritly_data_worker_up Whether the data preparation worker is running.\n"
+        "# TYPE veritly_data_worker_up gauge\n"
+        "veritly_data_worker_up 1\n",
+        mimetype="text/plain",
+    )
+
+
 @app.get("/readyz")
 def readyz():
     if not os.environ.get("DATA_WORKER_TOKEN", "").strip():
@@ -369,6 +379,52 @@ def preview():
         source.unlink(missing_ok=True)
         if target:
             target.unlink(missing_ok=True)
+
+
+@app.post("/locate")
+def locate():
+    if not authorized():
+        return jsonify({"error": "unauthorized"}), 401
+    source = upload()
+    book = None
+    try:
+        value = selection()
+        identity = request.form.get("identity", "").strip()
+        if not identity:
+            raise ValueError("identity is required")
+        sheet, header, start, end, columns = config(value)
+        book = load_workbook(source, read_only=True, data_only=True, keep_links=False)
+        if sheet not in book.sheetnames:
+            raise ValueError("Worksheet not found")
+        tab = book[sheet]
+        header_row = next(tab.iter_rows(min_row=header, max_row=header, values_only=True))
+        selected, fields = names(header_row, columns)
+        matches = [offset for offset, field in enumerate(fields) if field == identity]
+        if len(matches) != 1:
+            raise ValueError("identity column must occur exactly once in the selected range")
+        identity_column = selected[matches[0]]
+    except Exception:
+        if book:
+            book.close()
+        source.unlink(missing_ok=True)
+        raise
+
+    def generate():
+        try:
+            yield json.dumps({"$veritly": {"columns": fields}}, separators=(",", ":")) + "\n"
+            for number, row in enumerate(tab.iter_rows(min_row=start, max_row=end, values_only=True), start=start):
+                values = [row[column - 1] if column <= len(row) else None for column in selected]
+                if not any(item is not None for item in values):
+                    continue
+                yield json.dumps({
+                    "row": number - 1,
+                    "id": text(row[identity_column - 1] if identity_column <= len(row) else None),
+                }, separators=(",", ":")) + "\n"
+        finally:
+            book.close()
+            source.unlink(missing_ok=True)
+
+    return Response(stream_with_context(generate()), mimetype="application/x-ndjson")
 
 
 @app.post("/normalize")
