@@ -3,6 +3,7 @@ import react from "@vitejs/plugin-react-swc"
 import path from "node:path"
 
 export default defineConfig({
+  base: "/veritly/",
   plugins: [
     react(),
     {
@@ -10,7 +11,7 @@ export default defineConfig({
       configureServer(server) {
         server.middlewares.use((request, _response, next) => {
           if (request.url?.startsWith("/veritly/workspace")) {
-            request.url = request.url.replace("/veritly/workspace", "/veritly.html")
+            request.url = request.url.replace("/veritly/workspace", "/veritly/veritly.html")
           }
           next()
         })

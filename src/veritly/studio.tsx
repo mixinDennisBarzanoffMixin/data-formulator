@@ -1,6 +1,8 @@
 import AutoFixHighIcon from "@mui/icons-material/AutoFixHigh"
+import AddIcon from "@mui/icons-material/Add"
 import CloudUploadIcon from "@mui/icons-material/CloudUpload"
 import CompareArrowsIcon from "@mui/icons-material/CompareArrows"
+import DeleteIcon from "@mui/icons-material/Delete"
 import SaveAltIcon from "@mui/icons-material/SaveAlt"
 import {
   Alert,
@@ -16,7 +18,7 @@ import {
   Typography,
   createTheme,
 } from "@mui/material"
-import { DataGrid, type GridColDef, type GridValidRowModel } from "@mui/x-data-grid"
+import { DataGrid, GridActionsCellItem, type GridColDef, type GridValidRowModel } from "@mui/x-data-grid"
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import { frame, parent, type Incoming, type Preview, ready, send } from "./protocol"
 
@@ -40,6 +42,14 @@ type Profile = {
 }
 type Issue = { id: string; state: "open" | "resolved" }
 type Row = { id: string; version: number; values: Record<string, unknown> }
+type Dataset = {
+  id: string
+  prep?: string
+  class: "entity" | "derived" | "native"
+  columns: Preview["columns"]
+  rows: number
+}
+type Rows = { rows: Row[]; cursor?: string }
 type Job = { id: string; state: "queued" | "running" | "succeeded" | "failed" | "cancelled"; error?: string }
 type Quota = { used: number; limit: number; percent: number }
 type Pending = { resolve(value: unknown): void; reject(error: Error): void }
@@ -60,6 +70,7 @@ export function App() {
   const [columns, setColumns] = useState("")
   const [key, setKey] = useState("")
   const [preview, setPreview] = useState<Preview>()
+  const [draft, setDraft] = useState<Record<string, string>>()
   const [issues, setIssues] = useState<string[]>([])
   const [quota, setQuota] = useState<Quota>()
   const [busy, setBusy] = useState<string>()
@@ -71,6 +82,21 @@ export function App() {
     send({ type: "invoke", id, action, input })
     return new Promise<unknown>((resolve, reject) => pending.current.set(id, { resolve, reject }))
   }, [])
+
+  const database = useCallback(async (next: Recipe) => {
+    if (next.state !== "published") return
+    const list = (await invoke("datasets")) as { datasets: Dataset[] }
+    const dataset = list.datasets.find((item) => item.prep === next.id && item.class === "entity")
+    if (!dataset) return
+    const page = (await invoke("rows", { dataset: dataset.id, input: { limit: 100 } })) as Rows
+    setPreview({
+      dataset: dataset.id,
+      columns: dataset.columns,
+      rows: page.rows,
+      total: dataset.rows,
+      truncated: Boolean(page.cursor),
+    })
+  }, [invoke])
 
   useEffect(() => {
     const receive = (event: MessageEvent<Incoming>) => {
@@ -90,13 +116,12 @@ export function App() {
       if (event.data.type === "veritly.iframe.open") {
         setPrep({ path: event.data.path, recipe: event.data.payload.recipe })
         send({ type: "veritly.iframe.loaded", frame, request: event.data.request, path: event.data.path })
-        void Promise.all([invoke("inspect"), invoke("project")]).then(
-          ([value, project]) => {
-            setRecipe(value as Recipe)
+        void Promise.all([invoke("inspect"), invoke("project")]).then(async ([value, project]) => {
+            const next = value as Recipe
+            setRecipe(next)
             setQuota((project as { quota: Quota }).quota)
-          },
-          (cause: Error) => setError(cause.message),
-        )
+            await database(next)
+          }).catch((cause: Error) => setError(cause.message))
         return
       }
       if (event.data.type === "veritly.iframe.flush") {
@@ -123,7 +148,7 @@ export function App() {
     window.addEventListener("message", receive)
     ready()
     return () => window.removeEventListener("message", receive)
-  }, [invoke])
+  }, [database, invoke])
 
   const run = useCallback(
     async (name: string, input?: unknown) => {
@@ -217,10 +242,38 @@ export function App() {
         row: row._veritly_id,
         input: { expectedVersion: row._veritly_version, values: changed },
       })) as Row
+      setPreview((current) => current ? {
+        ...current,
+        rows: current.rows.map((item) => item.id === value.id ? value : item),
+      } : current)
       return gridrow(value)
     },
     [preview, run],
   )
+
+  const insert = useCallback(async () => {
+    if (!preview || !draft) throw new Error("Database row draft is not ready")
+    const values = Object.fromEntries(
+      preview.columns
+        .filter((item) => !item.system && item.owner !== "formula" && item.owner !== "derived")
+        .map((item) => [item.name, cell(draft[item.name] || "", item.type)]),
+    )
+    const row = (await run("insert", { dataset: preview.dataset, input: { values } })) as Row
+    setPreview((current) => current ? { ...current, rows: [...current.rows, row], total: current.total + 1 } : current)
+    setDraft(undefined)
+  }, [draft, preview, run])
+
+  const drop = useCallback(async (id: string) => {
+    if (!preview) throw new Error("Database rows are not loaded")
+    const row = preview.rows.find((item) => item.id === id)
+    if (!row) throw new Error("Database row is no longer visible")
+    await run("remove", { dataset: preview.dataset, row: id, input: { expectedVersion: row.version } })
+    setPreview((current) => current ? {
+      ...current,
+      rows: current.rows.filter((item) => item.id !== id),
+      total: Math.max(0, current.total - 1),
+    } : current)
+  }, [preview, run])
 
   if (!prep) {
     return (
@@ -231,13 +284,28 @@ export function App() {
     )
   }
 
-  const grid: GridColDef[] = (preview?.columns || []).map((item) => ({
-    field: item.name,
-    headerName: item.name,
-    editable: recipe?.state === "published" && item.owner !== "formula" && item.owner !== "derived",
-    minWidth: 140,
-    flex: 1,
-  }))
+  const grid: GridColDef[] = [
+    ...(preview?.columns || []).map((item) => ({
+      field: item.name,
+      headerName: item.name,
+      editable: recipe?.state === "published" && !item.system && !item.key && item.owner !== "formula" && item.owner !== "derived",
+      minWidth: 140,
+      flex: 1,
+    })),
+    ...(recipe?.state === "published" ? [{
+      field: "__actions",
+      type: "actions" as const,
+      width: 52,
+      getActions: ({ id }: { id: string | number }) => [
+        <GridActionsCellItem
+          key="delete"
+          icon={<DeleteIcon />}
+          label="Delete row"
+          onClick={() => drop(String(id)).catch((cause: Error) => setError(cause.message))}
+        />,
+      ],
+    }] : []),
+  ]
   const rows = (preview?.rows || []).map(gridrow)
 
   const execute = (name: "publish" | "writeback" | "reconcile") => {
@@ -255,9 +323,11 @@ export function App() {
         current = (await invoke("status", { job: current.id })) as Job
       }
       if (current.state !== "succeeded") throw new Error(current.error || `${name} ended in ${current.state}`)
-      const [next, project] = await Promise.all([invoke("inspect"), invoke("project")])
-      setRecipe(next as Recipe)
+      const [item, project] = await Promise.all([invoke("inspect"), invoke("project")])
+      const next = item as Recipe
+      setRecipe(next)
       setQuota((project as { quota: Quota }).quota)
+      await database(next)
       return current
     })
   }
@@ -306,7 +376,26 @@ export function App() {
           />
         </Paper>
 
+        {draft && preview && (
+          <Paper className="recipe" variant="outlined">
+            <Stack direction="row" gap={1.5} flexWrap="wrap" alignItems="center">
+              {preview.columns.filter((item) => !item.system && item.owner !== "formula" && item.owner !== "derived").map((item) => (
+                <TextField
+                  key={item.id}
+                  size="small"
+                  label={item.name}
+                  value={draft[item.name] || ""}
+                  onChange={(event) => setDraft((current) => ({ ...current, [item.name]: event.target.value }))}
+                />
+              ))}
+              <Button variant="contained" disabled={Boolean(busy)} onClick={() => insert().catch((cause: Error) => setError(cause.message))}>Create row</Button>
+              <Button disabled={Boolean(busy)} onClick={() => setDraft(undefined)}>Cancel</Button>
+            </Stack>
+          </Paper>
+        )}
+
         <Stack className="actions" direction="row" gap={1} justifyContent="flex-end">
+          <Button startIcon={<AddIcon />} disabled={recipe?.state !== "published" || Boolean(busy)} onClick={() => setDraft({})}>Add row</Button>
           <Button startIcon={<SaveAltIcon />} disabled={!recipe || Boolean(busy)} onClick={() => execute("writeback").catch((cause: Error) => setError(cause.message))}>Write back</Button>
           <Button startIcon={<CompareArrowsIcon />} disabled={!recipe || Boolean(busy)} onClick={() => execute("reconcile").catch((cause: Error) => setError(cause.message))}>Reconcile</Button>
           <Button variant="contained" startIcon={<CloudUploadIcon />} disabled={!recipe || Boolean(busy)} onClick={() => execute("publish").catch((cause: Error) => setError(cause.message))}>Publish</Button>
@@ -338,4 +427,24 @@ function bytes(value: number) {
   if (value >= 1024 ** 3) return `${(value / 1024 ** 3).toFixed(1)} GiB`
   if (value >= 1024 ** 2) return `${(value / 1024 ** 2).toFixed(1)} MiB`
   return `${value} B`
+}
+
+function cell(value: string, type: Preview["columns"][number]["type"]) {
+  if (!value) return null
+  if (type === "boolean") {
+    if (value.toLowerCase() === "true") return true
+    if (value.toLowerCase() === "false") return false
+    throw new Error(`Invalid boolean: ${value}`)
+  }
+  if (type === "integer") {
+    const parsed = Number(value)
+    if (!Number.isSafeInteger(parsed)) throw new Error(`Invalid integer: ${value}`)
+    return parsed
+  }
+  if (type === "decimal") {
+    const parsed = Number(value)
+    if (!Number.isFinite(parsed)) throw new Error(`Invalid number: ${value}`)
+    return parsed
+  }
+  return value
 }

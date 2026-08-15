@@ -2,20 +2,26 @@
 
 from __future__ import annotations
 
+import base64
+import hashlib
 import json
 import os
+import shutil
 import tempfile
 import zipfile
 from datetime import date, datetime, time
+from decimal import Decimal
 from pathlib import Path, PurePosixPath
 from typing import Iterator
+from uuid import UUID
 
 import duckdb
 import pyarrow as pa
 import pyarrow.parquet as pq
-from flask import Flask, after_this_request, jsonify, request, send_file
+from flask import Flask, Response, after_this_request, jsonify, request, send_file, stream_with_context
 from openpyxl import load_workbook
 from openpyxl.utils.cell import column_index_from_string
+from data_formulator.veritly_recipe import RecipeError, execute as execute_recipe, rewrite_metadata
 
 
 MAX_BYTES = 100 * 1024 * 1024
@@ -58,6 +64,62 @@ def upload() -> Path:
         raise ValueError("XLSX exceeds 100 MiB")
     audit(path)
     return path
+
+
+def recipe() -> dict[str, object]:
+    raw = request.form.get("recipe")
+    if not raw:
+        raise RecipeError("invalid_input", "recipe is required")
+    try:
+        value = json.loads(raw)
+    except json.JSONDecodeError as error:
+        raise RecipeError("invalid_input", "recipe must be valid JSON") from error
+    if not isinstance(value, dict):
+        raise RecipeError("invalid_input", "recipe must be an object")
+    return value
+
+
+def parquet_inputs(root: Path, value: dict[str, object]) -> dict[str, Path]:
+    names = value.get("inputs")
+    files = request.files.getlist("file")
+    if not isinstance(names, list) or not names or len(names) != len(files):
+        raise RecipeError("invalid_input", "recipe inputs must match the staged files")
+    output: dict[str, Path] = {}
+    total = 0
+    for offset, item in enumerate(names):
+        if not isinstance(item, str) or not item.strip() or len(item) > 256 or item in output:
+            raise RecipeError("invalid_input", "recipe input identifiers must be unique")
+        target = root / f"input-{offset}.parquet"
+        files[offset].save(target)
+        total += target.stat().st_size
+        if total > MAX_BYTES:
+            raise RecipeError("invalid_input", "Parquet inputs exceed 100 MiB")
+        output[item] = target
+    return output
+
+
+def digest(value: dict[str, object]) -> str:
+    raw = json.dumps(value, separators=(",", ":")).encode()
+    return hashlib.sha256(raw).hexdigest()
+
+
+def scalar(value: object) -> object:
+    if isinstance(value, (datetime, date, time, UUID, Decimal)):
+        return str(value)
+    if isinstance(value, bytes):
+        return base64.b64encode(value).decode()
+    return value
+
+
+def ndjson(path: Path, manifest: dict[str, object], root: Path) -> Iterator[str]:
+    try:
+        yield json.dumps({"$veritly": manifest}, separators=(",", ":")) + "\n"
+        source = pq.ParquetFile(path)
+        for batch in source.iter_batches(batch_size=BATCH):
+            for row in batch.to_pylist():
+                yield json.dumps({key: scalar(value) for key, value in row.items()}, separators=(",", ":")) + "\n"
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
 
 
 def audit(path: Path) -> None:
@@ -231,7 +293,7 @@ def lineage(path: Path, value: dict[str, object], fields: list[str]) -> dict[str
         source.close()
         cached.close()
         raise ValueError("Worksheet not found")
-    output = {field: {"formulas": 0, "stale": 0} for field in fields}
+    output = {field: {"formulas": 0, "stale": 0, "expressions": []} for field in fields}
     raw = source[sheet].iter_rows(min_row=start, max_row=end, values_only=True)
     values = cached[sheet].iter_rows(min_row=start, max_row=end, values_only=True)
     try:
@@ -241,6 +303,8 @@ def lineage(path: Path, value: dict[str, object], fields: list[str]) -> dict[str
                 if not isinstance(formula, str) or not formula.startswith("="):
                     continue
                 output[fields[offset]]["formulas"] += 1
+                if formula not in output[fields[offset]]["expressions"] and len(output[fields[offset]]["expressions"]) < 20:
+                    output[fields[offset]]["expressions"].append(formula)
                 value = right[column - 1] if column <= len(right) else None
                 if value is None:
                     output[fields[offset]]["stale"] += 1
@@ -312,7 +376,18 @@ def normalize():
     if not authorized():
         return jsonify({"error": "unauthorized"}), 401
     source = upload()
-    target, _, _ = parquet(source, selection())
+    value = selection()
+    target, _, fields = parquet(source, value)
+    formulas = lineage(source, value, fields)
+    rewrite_metadata(target, b"veritly.lineage", {
+        field: {
+            "owner": "formula" if formulas[field]["formulas"] else "shared",
+            **({"formula": formulas[field]["expressions"][0]} if formulas[field]["expressions"] else {}),
+            "stale": formulas[field]["stale"] > 0,
+            "staleCount": formulas[field]["stale"],
+        }
+        for field in fields
+    })
     source.unlink(missing_ok=True)
 
     @after_this_request
@@ -323,8 +398,69 @@ def normalize():
     return send_file(target, mimetype="application/vnd.apache.parquet", as_attachment=True, download_name="dataset.parquet")
 
 
+@app.post("/execute")
+def execute():
+    if not authorized():
+        return jsonify({"error": "unauthorized"}), 401
+    root = Path(tempfile.mkdtemp(prefix="veritly-recipe-"))
+    try:
+        value = recipe()
+        commands = value.get("commands")
+        if not isinstance(commands, list):
+            raise RecipeError("invalid_input", "recipe commands must be an array")
+        output = value.get("output")
+        if not isinstance(output, str) or not output:
+            raise RecipeError("invalid_input", "recipe output is required")
+        lineage = value.get("lineage")
+        if lineage is not None and not isinstance(lineage, dict):
+            raise RecipeError("invalid_input", "recipe lineage must be an object")
+        rows = value.get("rows", 1_000_000)
+        if not isinstance(rows, int):
+            raise RecipeError("invalid_input", "recipe rows must be an integer")
+        result = execute_recipe(
+            root,
+            parquet_inputs(root, value),
+            commands,
+            output,
+            lineage,
+            value.get("writeback") is True,
+            rows,
+        )
+        headers = {
+            "X-Veritly-Recipe-Sha256": digest(result.manifest),
+            "X-Content-Type-Options": "nosniff",
+        }
+        if "application/x-ndjson" in request.headers.get("accept", ""):
+            return Response(
+                stream_with_context(ndjson(result.path, result.manifest, root)),
+                mimetype="application/x-ndjson",
+                headers=headers,
+            )
+
+        @after_this_request
+        def cleanup_recipe(response):
+            shutil.rmtree(root, ignore_errors=True)
+            return response
+
+        response = send_file(
+            result.path,
+            mimetype="application/vnd.apache.parquet",
+            as_attachment=True,
+            download_name="dataset.parquet",
+            conditional=False,
+            etag=False,
+        )
+        response.headers.update(headers)
+        return response
+    except Exception:
+        shutil.rmtree(root, ignore_errors=True)
+        raise
+
+
 @app.errorhandler(ValueError)
 def invalid(error: ValueError):
+    if isinstance(error, RecipeError):
+        return jsonify({"error": str(error), "code": error.code, "command": error.command}), 400
     return jsonify({"error": str(error)}), 400
 
 

@@ -75,6 +75,8 @@ export type Preview = {
     type: "text" | "boolean" | "integer" | "decimal" | "date" | "timestamp"
     owner: "shared" | "workbook" | "database" | "formula" | "derived"
     nullable: boolean
+    system?: boolean
+    key?: boolean
   }>
   rows: Array<{ id: string; version: number; values: Record<string, unknown> }>
   total: number
