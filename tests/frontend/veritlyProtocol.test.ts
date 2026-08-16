@@ -8,6 +8,30 @@ beforeAll(() => {
 afterEach(() => vi.restoreAllMocks())
 
 describe("Veritly preparation protocol", () => {
+  test("creates secure UUIDs without randomUUID", async () => {
+    const random = vi.spyOn(crypto, "getRandomValues")
+    const protocol = await import("../../src/veritly/protocol")
+    expect(protocol.uuid()).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/)
+    expect(random).toHaveBeenCalledOnce()
+  })
+
+  test("accepts new opens and identifies only exact duplicates", async () => {
+    const protocol = await import("../../src/veritly/protocol")
+    const opens = new protocol.OpenGuard()
+    const open = protocol.Open.parse({
+      type: "veritly.iframe.open",
+      frame: "dataprep:project",
+      request: 1,
+      path: "Sales.prep",
+      payload: { recipe: "recipe" },
+    })
+    expect(opens.accept(open)).toBe(true)
+    expect(opens.accept(open)).toBe(false)
+    expect(() => opens.accept({ ...open, path: "Changed.prep" })).toThrow("changed while opening")
+    expect(opens.accept({ ...open, request: 2 })).toBe(true)
+    expect(() => opens.accept(open)).toThrow("Stale data preparation request")
+  })
+
   test("rejects malformed iframe messages", async () => {
     const protocol = await import("../../src/veritly/protocol")
     expect(protocol.parse({ type: "result", id: "call", ok: true }).success).toBe(false)

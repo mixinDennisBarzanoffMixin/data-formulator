@@ -26,6 +26,7 @@ import {
   Datasets,
   Issues,
   Job,
+  OpenGuard,
   Preview,
   Profile,
   Project,
@@ -71,6 +72,7 @@ export function App() {
   const [busy, setBusy] = useState<string>()
   const [error, setError] = useState<string>()
   const active = useRef<string>()
+  const opens = useMemo(() => new OpenGuard(), [])
   const bridge = useMemo(() => new Bridge(() => active.current), [])
 
   const invoke = useCallback(<T,>(action: string, input: unknown, schema: z.ZodType<T>) =>
@@ -111,6 +113,10 @@ export function App() {
       }
       if (parsed.data.frame !== frame) return
       if (parsed.data.type === "veritly.iframe.open") {
+        if (!opens.accept(parsed.data)) {
+          send({ type: "veritly.iframe.loaded", frame, request: parsed.data.request, path: parsed.data.path })
+          return
+        }
         const path = parsed.data.path
         bridge.reset()
         active.current = path
@@ -168,7 +174,7 @@ export function App() {
     window.addEventListener("message", receive)
     ready()
     return () => window.removeEventListener("message", receive)
-  }, [database, invoke])
+  }, [database, invoke, opens])
 
   const run = useCallback(
     async <T,>(name: string, input: unknown, schema: z.ZodType<T>) => {

@@ -219,6 +219,31 @@ export const Receipt = z.object({
 
 type Pending = { resolve(value: unknown): void; reject(error: Error): void }
 
+export class OpenGuard {
+  #open?: Open
+
+  accept(next: Open) {
+    const open = this.#open
+    if (!open || next.request > open.request) {
+      this.#open = next
+      return true
+    }
+    if (next.request < open.request) throw new Error(`Stale data preparation request: ${next.request}`)
+    if (next.path !== open.path || next.payload.recipe !== open.payload.recipe) {
+      throw new Error(`Data preparation request ${next.request} changed while opening`)
+    }
+    return false
+  }
+}
+
+export function uuid() {
+  const bytes = crypto.getRandomValues(new Uint8Array(16))
+  bytes[6] = (bytes[6] & 15) | 64
+  bytes[8] = (bytes[8] & 63) | 128
+  const hex = Array.from(bytes, (value) => value.toString(16).padStart(2, "0")).join("")
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`
+}
+
 export class Bridge {
   readonly #calls = new Map<string, Pending>()
 
@@ -227,7 +252,7 @@ export class Bridge {
   invoke<T>(action: string, input: unknown, schema: z.ZodType<T>) {
     const path = this.current()
     if (!path) throw new Error("Data preparation is not open")
-    const id = crypto.randomUUID()
+    const id = uuid()
     return new Promise<unknown>((resolve, reject) => {
       this.#calls.set(id, { resolve, reject })
       send({ type: "invoke", id, path, action, input })
