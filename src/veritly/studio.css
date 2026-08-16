@@ -322,27 +322,6 @@ body,
   border: 2px solid #6750a4;
 }
 
-.region-preview {
-  display: grid;
-  grid-template-columns: repeat(4, 1fr);
-  height: 74px;
-  padding: 7px;
-  gap: 2px;
-  background: #f4f1f8;
-}
-
-.region-header {
-  grid-column: 1 / -1;
-  height: 10px;
-  border-radius: 2px;
-  background: #6750a4;
-}
-
-.region-cell {
-  border: 1px solid #ddd7e8;
-  background: #fff;
-}
-
 .region-meta {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
@@ -361,15 +340,35 @@ body,
 }
 
 .range-settings {
-  display: grid;
-  grid-template-columns: minmax(200px, 1fr) minmax(200px, .9fr);
-  align-items: center;
   margin-top: 16px;
   padding: 12px;
-  gap: 16px;
   border: 1px solid #dedede;
   border-radius: 5px;
   background: #fafafa;
+}
+
+.range-settings-head,
+.identity-settings {
+  display: grid;
+  grid-template-columns: minmax(200px, 1fr) minmax(220px, .8fr);
+  align-items: center;
+  gap: 16px;
+}
+
+.range-settings-head > :last-child {
+  justify-self: end;
+}
+
+.range-fields {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(110px, 1fr));
+  margin: 14px 0;
+  gap: 8px;
+}
+
+.identity-settings {
+  padding-top: 12px;
+  border-top: 1px solid #e2e2e2;
 }
 
 .mapping {

@@ -204,6 +204,139 @@ describe("Veritly preparation controller", () => {
     fetcher.mockRestore()
   })
 
+  test("invalidates derived state only when an external recipe changes", async () => {
+    const { PrepStudio } = await import("../../src/veritly/controller")
+    const post = vi.spyOn(window, "postMessage").mockImplementation(() => undefined)
+    const server = { wire: recipe(), reads: 0 }
+    const fetcher = vi.spyOn(window, "fetch").mockImplementation(async (input) => {
+      const url = String(input)
+      if (url.endsWith("/preps/recipe")) {
+        server.reads += 1
+        return Response.json(server.wire)
+      }
+      if (url.endsWith("/project")) return Response.json({
+        id: "project",
+        state: "unprovisioned",
+        quota: { used: 0, limit: 10_737_418_240, percent: 0 },
+        revision: 0,
+        preps: [],
+      })
+      if (url.endsWith("/datasets")) return Response.json({ datasets: [] })
+      if (url.endsWith("/issues")) return Response.json({ issues: [] })
+      if (url.endsWith("/workbooks")) return Response.json({
+        workbooks: [{ file: "file-1", path: "Sales.xlsx", revision: 4, updated: 1 }],
+      })
+      if (url.endsWith("/mapping")) return Response.json({
+        prep: "recipe",
+        version: server.wire.version,
+        state: server.wire.state,
+        source: server.wire.source,
+        sources: [],
+        targets: [],
+      })
+      if (url.endsWith("/workbook")) return Response.json({
+        file: "file-1",
+        revision: 4,
+        sheets: [{
+          name: "Rows",
+          rows: { start: 1, end: 100 },
+          columns: { start: 1, end: 5 },
+          visibility: "visible",
+          regions: [{ header: 1, start: 2, end: 100, left: 1, right: 5 }],
+        }],
+      })
+      if (url.endsWith("/profile")) return Response.json({
+        dataset: "entity-rows",
+        rows: 9,
+        columns: [{
+          column: "Order ID",
+          type: "text",
+          nulls: 0,
+          distinct: 9,
+          invalid: 0,
+          formulas: 0,
+          stale: 0,
+          expressions: [],
+        }],
+        issues: 0,
+      })
+      if (url.endsWith("/preview")) return Response.json({
+        dataset: "entity-rows",
+        columns: [],
+        rows: [],
+        total: 9,
+        truncated: false,
+      })
+      throw new Error(`Unexpected data request: ${url}`)
+    })
+    const model = new PrepStudio()
+    model.mount()
+
+    receive({
+      type: "veritly.iframe.open",
+      frame: "dataprep:project",
+      request: 2,
+      path: "Sales.prep",
+      payload: { recipe: "recipe", project: "project" },
+    })
+    await vi.waitFor(() => expect(model.get().phase).toBe("ready"))
+    await model.profile("entity-rows")
+    await model.preview({ dataset: "entity-rows", limit: 100 })
+    expect(model.get().profile).toBeDefined()
+    expect(model.get().preview).toBeDefined()
+
+    server.wire = {
+      ...recipe(),
+      commands: recipe().commands.map((command) => command.kind === "source"
+        ? { ...command, range: { ...command.range, end: 20, right: 2 } }
+        : command),
+    }
+    const feed = feeds.at(-1)
+    if (!feed) throw new Error("Controller did not subscribe to project data changes")
+    feed.dispatchEvent(new Event("project"))
+    await vi.waitFor(() => expect(model.get().config.end).toBe(20))
+    await vi.waitFor(() => expect(model.get().busy).toBeUndefined())
+
+    expect(model.get().recipe?.version).toBe(1)
+    expect(model.get().config).toEqual({
+      sheet: "Rows",
+      header: 1,
+      start: 2,
+      end: 20,
+      columns: [1, 2],
+      keys: ["Order ID"],
+    })
+    expect(model.get().profile).toBeUndefined()
+    expect(model.get().preview).toBeUndefined()
+
+    await model.profile("entity-rows")
+    await model.preview({ dataset: "entity-rows", limit: 100 })
+    server.wire = { ...server.wire, version: 2 }
+    feed.dispatchEvent(new Event("project"))
+    await vi.waitFor(() => expect(model.get().recipe?.version).toBe(2))
+    await vi.waitFor(() => expect(model.get().busy).toBeUndefined())
+    expect(model.get().profile).toBeUndefined()
+    expect(model.get().preview).toBeUndefined()
+
+    await model.profile("entity-rows")
+    await model.preview({ dataset: "entity-rows", limit: 100 })
+    const profile = model.get().profile
+    const preview = model.get().preview
+    const config = model.select({ ...model.get().config, end: 18 })
+    const reads = server.reads
+    feed.dispatchEvent(new Event("issue"))
+    await vi.waitFor(() => expect(server.reads).toBeGreaterThan(reads))
+    await vi.waitFor(() => expect(model.get().busy).toBeUndefined())
+
+    expect(model.get().config).toBe(config)
+    expect(model.get().profile).toBe(profile)
+    expect(model.get().preview).toBe(preview)
+
+    model.unmount()
+    post.mockRestore()
+    fetcher.mockRestore()
+  })
+
   test("builds typed transform steps and preserves output ownership", async () => {
     const model = await import("../../src/veritly/model")
     const prep = model.recipe(recipe())

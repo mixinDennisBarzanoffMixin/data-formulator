@@ -96,18 +96,25 @@ describe("Veritly preparation studio", () => {
     expect(screen.getByText("Suggested table 2")).toBeVisible()
 
     fireEvent.click(screen.getByRole("button", { name: /Empty 0 suggested tables/ }))
-    expect(await screen.findByText("This worksheet has no detected table-like region. Choose another worksheet.")).toBeVisible()
+    expect(await screen.findByText("No table-like range was detected. Enter the exact worksheet bounds below.")).toBeVisible()
     expect(screen.getAllByRole("button", { name: "Analyze selection" }).every((button) => button.hasAttribute("disabled"))).toBe(true)
 
     fireEvent.click(screen.getByRole("button", { name: /Transactions 2 suggested tables/ }))
     fireEvent.click(screen.getByRole("button", { name: /Suggested table 2/ }))
-    expect(screen.getByText("I2:J20 · 18 rows")).toBeVisible()
+    expect(screen.getAllByText("I2:J20 · 18 rows")).toHaveLength(2)
     expect(screen.getAllByRole("button", { name: "Analyze selection" }).every((button) => !button.hasAttribute("disabled"))).toBe(true)
+
+    fireEvent.change(screen.getByRole("spinbutton", { name: "Header row" }), { target: { value: "5" } })
+    fireEvent.change(screen.getByRole("spinbutton", { name: "First data row" }), { target: { value: "7" } })
+    fireEvent.change(screen.getByRole("spinbutton", { name: "Last data row" }), { target: { value: "44" } })
+    fireEvent.change(screen.getByRole("spinbutton", { name: "First column" }), { target: { value: "3" } })
+    fireEvent.change(screen.getByRole("spinbutton", { name: "Last column" }), { target: { value: "7" } })
+    expect(screen.getByText("C5:G44 · 38 rows")).toBeVisible()
 
     fireEvent.mouseDown(screen.getByRole("combobox", { name: "Workbook" }))
     fireEvent.click(await screen.findByRole("option", { name: "Archive.xlsx · r2" }))
     expect(await screen.findByText("History")).toBeVisible()
-    expect(screen.getByText("A1:F50 · 49 rows")).toBeVisible()
+    expect(screen.getAllByText("A1:F50 · 49 rows")).toHaveLength(2)
 
     post.mockRestore()
     fetcher.mockRestore()

@@ -616,15 +616,29 @@ export class PrepStudio {
       (cataloged.file !== prep.source.file || cataloged.revision !== prep.source.revision)) {
       throw new Error("Workbook catalog does not match the immutable preparation source")
     }
+    const current = this.get()
+    const invalid = reset || this.#different(current.recipe, prep)
+    if (invalid) {
+      this.#cursors.clear()
+      this.#cursors.set(0, undefined)
+    }
     this.#next({
       recipe: prep,
       catalog: cataloged,
-      config: reset && cataloged ? bounds(cataloged) : this.get().config,
+      config: invalid
+        ? cataloged && !source(prep) ? bounds(cataloged) : config(prep)
+        : current.config,
       workbooks: Object.freeze([...books.workbooks]),
       mapping,
       quota: Quota.parse(project.quota),
       datasets: Object.freeze([...list.datasets]),
       issues: Object.freeze([...issues]),
+      view: invalid ? nav(prep) : current.view,
+      draft: invalid ? undefined : current.draft,
+      transform: invalid ? undefined : current.transform,
+      profile: invalid ? undefined : current.profile,
+      preview: invalid ? undefined : current.preview,
+      paging: invalid ? Object.freeze({ page: 0, pageSize: 100 }) : current.paging,
     })
     await this.#database(prep, list.datasets)
   }
@@ -771,6 +785,12 @@ export class PrepStudio {
 
   #assert(gate: StudioGate) {
     if (!gate.enabled) throw new Error(gate.reason)
+  }
+
+  #different(current: PrepRecipe | undefined, next: PrepRecipe) {
+    if (!current) return true
+    if (current.version !== next.version) return true
+    return JSON.stringify(current.commands) !== JSON.stringify(next.commands)
   }
 
   #assertView(view: StudioView) {

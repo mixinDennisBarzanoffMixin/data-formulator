@@ -45,6 +45,7 @@ import {
 } from "@mui/material"
 import { DataGrid, type GridColDef, type GridValidRowModel } from "@mui/x-data-grid"
 import React, { useCallback, useEffect, useMemo, useSyncExternalStore } from "react"
+import { z } from "zod"
 import { PrepStudio, studio } from "./controller"
 import { output as recipeOutput } from "./model"
 import type {
@@ -62,6 +63,9 @@ type GridRow = GridValidRowModel & {
   _veritly_id: string
   _veritly_version: number
 }
+
+const RowIndex = z.coerce.number().int().positive().max(1_048_576)
+const ColumnIndex = z.coerce.number().int().positive().max(16_384)
 
 const theme = createTheme({
   palette: {
@@ -432,7 +436,7 @@ function Source({ model, state }: ViewProps) {
           </Action>
         </Box>
         {!sheet?.regions.length && (
-          <Alert severity="info">This worksheet has no detected table-like region. Choose another worksheet.</Alert>
+          <Alert severity="info">No table-like range was detected. Enter the exact worksheet bounds below.</Alert>
         )}
         <Box className="region-grid">
           {sheet?.regions.map((region, offset) => {
@@ -445,10 +449,6 @@ function Source({ model, state }: ViewProps) {
                 type="button"
                 onClick={() => model.region(offset)}
               >
-                <Box className="region-preview">
-                  <Box className="region-header" />
-                  {Array.from({ length: 12 }, (_, cell) => <Box key={cell} className="region-cell" />)}
-                </Box>
                 <Box className="region-meta">
                   <Typography fontSize={12} fontWeight={700}>Suggested table {offset + 1}</Typography>
                   <Typography color="text.secondary" fontSize={10}>
@@ -460,19 +460,76 @@ function Source({ model, state }: ViewProps) {
             )
           })}
         </Box>
-        {sheet?.regions.length ? (
+        {sheet ? (
           <Box className="range-settings">
-            <Box>
+            <Box className="range-settings-head">
+              <Box>
+                <Typography fontSize={12} fontWeight={650}>Exact source range</Typography>
+                <Typography color="text.secondary" fontSize={10}>Set the header, data rows, and contiguous source columns. Detected tables are suggestions only.</Typography>
+              </Box>
+              <Chip
+                size="small"
+                color={state.config.columns.length ? "primary" : "default"}
+                label={selection(state.config)}
+              />
+            </Box>
+            <Box className="range-fields">
+              <TextField
+                size="small"
+                type="number"
+                label="Header row"
+                value={state.config.header}
+                slotProps={{ htmlInput: { min: sheet.rows.start, max: sheet.rows.end } }}
+                onChange={(event) => change(event.target.value, RowIndex, (header) => select(model, state.config, { header }))}
+              />
+              <TextField
+                size="small"
+                type="number"
+                label="First data row"
+                value={state.config.start}
+                slotProps={{ htmlInput: { min: sheet.rows.start, max: sheet.rows.end } }}
+                onChange={(event) => change(event.target.value, RowIndex, (start) => select(model, state.config, { start }))}
+              />
+              <TextField
+                size="small"
+                type="number"
+                label="Last data row"
+                value={state.config.end}
+                slotProps={{ htmlInput: { min: sheet.rows.start, max: sheet.rows.end } }}
+                onChange={(event) => change(event.target.value, RowIndex, (end) => select(model, state.config, { end }))}
+              />
+              <TextField
+                size="small"
+                type="number"
+                label="First column"
+                value={state.config.columns[0] === undefined ? "" : state.config.columns[0]}
+                slotProps={{ htmlInput: { min: sheet.columns.start, max: sheet.columns.end } }}
+                onChange={(event) => change(event.target.value, ColumnIndex, (left) =>
+                  select(model, state.config, { columns: span(left, last(state.config.columns)) }))}
+              />
+              <TextField
+                size="small"
+                type="number"
+                label="Last column"
+                value={last(state.config.columns) === undefined ? "" : last(state.config.columns)}
+                slotProps={{ htmlInput: { min: sheet.columns.start, max: sheet.columns.end } }}
+                onChange={(event) => change(event.target.value, ColumnIndex, (right) =>
+                  select(model, state.config, { columns: span(state.config.columns[0], right) }))}
+              />
+            </Box>
+            <Box className="identity-settings">
+              <Box>
               <Typography fontSize={12} fontWeight={650}>Row identity</Typography>
               <Typography color="text.secondary" fontSize={10}>Choose immutable business keys, or leave empty to create a visible Veritly ID.</Typography>
+              </Box>
+              <TextField
+                size="small"
+                label="Business key columns"
+                placeholder="Customer ID"
+                value={state.config.keys.join(", ")}
+                onChange={(event) => select(model, state.config, { keys: names(event.target.value) })}
+              />
             </Box>
-            <TextField
-              size="small"
-              label="Business key columns"
-              placeholder="Customer ID"
-              value={state.config.keys.join(", ")}
-              onChange={(event) => select(model, state.config, { keys: names(event.target.value) })}
-            />
           </Box>
         ) : undefined}
       </Box>
@@ -962,6 +1019,26 @@ function select(model: PrepStudio, config: PrepConfig, patch: Partial<PrepConfig
   model.select({ ...config, ...patch })
 }
 
+function change(value: string, schema: typeof RowIndex, apply: (value: number) => void) {
+  if (!value) return
+  apply(schema.parse(value))
+}
+
+function span(first: number | undefined, second: number | undefined) {
+  const left = first === undefined ? second : first
+  const right = second === undefined ? first : second
+  if (left === undefined || right === undefined) throw new Error("Workbook column selection has no boundary")
+  const start = Math.min(left, right)
+  return Array.from({ length: Math.max(left, right) - start + 1 }, (_, index) => start + index)
+}
+
+function selection(config: PrepConfig) {
+  const left = config.columns[0]
+  const right = last(config.columns)
+  if (left === undefined || right === undefined) return "No columns selected"
+  return `${letters(left)}${config.header}:${letters(right)}${config.end} · ${(config.end - config.start + 1).toLocaleString()} rows`
+}
+
 async function update(model: PrepStudio, preview: Preview, row: GridRow) {
   const values = Object.fromEntries(
     preview.columns
@@ -1052,9 +1129,7 @@ function letters(value: number | undefined) {
 }
 
 function last(columns: readonly number[]) {
-  const value = columns.at(-1)
-  if (!value) return 1
-  return value
+  return columns.at(-1)
 }
 
 function value(raw: string | undefined) {
