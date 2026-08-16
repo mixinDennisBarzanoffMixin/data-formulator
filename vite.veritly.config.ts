@@ -24,5 +24,9 @@ export default defineConfig({
     emptyOutDir: true,
     rollupOptions: { input: path.join(__dirname, "veritly.html") },
   },
-  server: { host: "0.0.0.0", port: 5568 },
+  server: {
+    host: "0.0.0.0",
+    port: 5568,
+    allowedHosts: ["data-web", ".veritly.co.uk", ".veritly.svc.cluster.local", "localhost"],
+  },
 })
