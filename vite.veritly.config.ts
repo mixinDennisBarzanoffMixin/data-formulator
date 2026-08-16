@@ -9,7 +9,12 @@ export default defineConfig({
     {
       name: "veritly-workspace",
       configureServer(server) {
-        server.middlewares.use((request, _response, next) => {
+        server.middlewares.use((request, response, next) => {
+          if (request.url === "/readyz") {
+            response.setHeader("content-type", "application/json; charset=utf-8")
+            response.end('{"ok":true}')
+            return
+          }
           if (request.url?.startsWith("/veritly/workspace")) {
             request.url = request.url.replace("/veritly/workspace", "/veritly/veritly.html")
           }
