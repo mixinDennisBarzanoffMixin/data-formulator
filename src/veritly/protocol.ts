@@ -1,3 +1,23 @@
+import { DataClient } from "@veritly/data-client"
+import {
+  ApplyCommandsInput,
+  ApplyInput,
+  EditInput,
+  InsertInput,
+  Mapping as DataMapping,
+  PreviewInput,
+  ProfileInput,
+  PublishInput,
+  RebindPrepInput,
+  ReconcileInput,
+  RemoveInput,
+  Resolution,
+  RowsInput,
+  UpsertInput,
+  WritebackInput,
+  Workbook as DataWorkbook,
+  Workbooks as DataWorkbooks,
+} from "@veritly/data-protocol"
 import { z } from "zod"
 
 const Id = z.string().trim().min(1).max(256)
@@ -12,19 +32,21 @@ const Class = z.enum(["entity", "derived", "native"])
 const Query = z.object({
   frame: Id,
   parentOrigin: z.string().url(),
+  api: z.string().url().refine((value) => new URL(value).origin === value, "Data API URL must be a canonical origin"),
 })
 
 const query = Query.parse(Object.fromEntries(new URLSearchParams(window.location.search)))
 export const frame = query.frame
 export const parent = new URL(query.parentOrigin).origin
 if (parent !== query.parentOrigin) throw new Error("Data preparation parent origin must be canonical")
+const client = new DataClient(query.api, (input, init) => window.fetch(input, init))
 
 export const Open = z.object({
   type: z.literal("veritly.iframe.open"),
   frame: Id,
   request: Request,
   path: Path,
-  payload: z.object({ recipe: Id }),
+  payload: z.object({ recipe: Id, project: Id }),
 })
 export type Open = z.infer<typeof Open>
 
@@ -46,14 +68,7 @@ export const FrameInvoke = z.object({
 }).refine((value) => Object.hasOwn(value, "payload"), { message: "Iframe invocation payload is required" })
 export type FrameInvoke = z.infer<typeof FrameInvoke>
 
-export const Result = z.discriminatedUnion("ok", [
-  z.object({ type: z.literal("result"), id: Id, ok: z.literal(true), value: z.unknown() })
-    .refine((value) => Object.hasOwn(value, "value"), { message: "Invocation result value is required" }),
-  z.object({ type: z.literal("result"), id: Id, ok: z.literal(false), error: z.string().min(1) }),
-])
-export type Result = z.infer<typeof Result>
-
-export const Incoming = z.union([Open, Flush, FrameInvoke, Result])
+export const Incoming = z.union([Open, Flush, FrameInvoke])
 export type Incoming = z.infer<typeof Incoming>
 
 const Ready = z.object({
@@ -87,19 +102,13 @@ const FrameError = z.object({
   request: Request,
   error: z.string().min(1),
 })
-const Invoke = z.object({
-  type: z.literal("invoke"),
-  id: Id,
-  path: Path,
-  action: Id,
-  input: z.unknown().optional(),
-})
 const Ai = z.object({
   type: z.literal("veritly.data.ai"),
   path: Path,
+  intent: z.enum(["configure", "explain", "fix"]),
   issues: z.array(Id).max(100),
 })
-export const Outgoing = z.union([Ready, Loaded, Flushed, FrameResult, FrameError, Invoke, Ai])
+export const Outgoing = z.union([Ready, Loaded, Flushed, FrameResult, FrameError, Ai])
 export type Outgoing = z.infer<typeof Outgoing>
 
 export const Column = z.object({
@@ -170,6 +179,11 @@ export const WorkbookCatalog = z.strictObject({
   sheets: z.array(WorkbookSheet).min(1).max(1_024),
 })
 export type WorkbookCatalog = z.infer<typeof WorkbookCatalog>
+export const Workbook = DataWorkbook
+export type Workbook = z.infer<typeof Workbook>
+export const Workbooks = DataWorkbooks
+export const Mapping = DataMapping
+export type Mapping = z.infer<typeof Mapping>
 
 export const Recipe = z.object({
   id: Id,
@@ -312,8 +326,6 @@ export const Receipt = z.object({
   created: z.number().int().nonnegative(),
 })
 
-type Pending = { resolve(value: unknown): void; reject(error: Error): void }
-
 export class OpenGuard {
   #open?: Open
 
@@ -324,7 +336,7 @@ export class OpenGuard {
       return true
     }
     if (next.request < open.request) throw new Error(`Stale data preparation request: ${next.request}`)
-    if (next.path !== open.path || next.payload.recipe !== open.payload.recipe) {
+    if (next.path !== open.path || next.payload.recipe !== open.payload.recipe || next.payload.project !== open.payload.project) {
       throw new Error(`Data preparation request ${next.request} changed while opening`)
     }
     return false
@@ -340,37 +352,69 @@ export function uuid() {
 }
 
 export class Bridge {
-  readonly #calls = new Map<string, Pending>()
+  constructor(private readonly current: () => Readonly<{ path: string; project: string; recipe: string }> | undefined) {}
 
-  constructor(private readonly current: () => string | undefined) {}
-
-  invoke<T>(action: string, input: unknown, schema: z.ZodType<T>) {
-    const path = this.current()
-    if (!path) throw new Error("Data preparation is not open")
-    const id = uuid()
-    return new Promise<unknown>((resolve, reject) => {
-      this.#calls.set(id, { resolve, reject })
-      send({ type: "invoke", id, path, action, input })
-    }).then((value) => schema.parse(value))
+  invoke<T>(action: string, input: unknown, schema: { parse(value: unknown): T }) {
+    const current = this.current()
+    if (!current) throw new Error("Data preparation is not open")
+    return this.call(current, action, input).then((value) => schema.parse(value))
   }
 
-  settle(result: Result) {
-    const call = this.#calls.get(result.id)
-    if (!call) return false
-    this.#calls.delete(result.id)
-    if (result.ok) {
-      call.resolve(result.value)
-      return true
+  reset() {}
+
+  private call(current: Readonly<{ project: string; recipe: string }>, action: string, input: unknown) {
+    if (action === "inspect") return client.prep(current.project, current.recipe)
+    if (action === "workbooks") return client.workbooks(current.project)
+    if (action === "workbook") return client.workbook(current.project, current.recipe)
+    if (action === "mapping") return client.mapping(current.project, current.recipe)
+    if (action === "rebind") return client.rebind(current.project, current.recipe, RebindPrepInput.parse(input))
+    if (action === "project") return client.project(current.project)
+    if (action === "datasets") return client.datasets(current.project)
+    if (action === "apply") return client.apply(current.project, current.recipe, ApplyInput.parse(input))
+    if (action === "applyAll") return client.applyBatch(current.project, current.recipe, ApplyCommandsInput.parse(input))
+    if (action === "profile") return client.profile(current.project, current.recipe, ProfileInput.parse(input))
+    if (action === "preview") return client.preview(current.project, current.recipe, PreviewInput.parse(input))
+    if (action === "publish") return client.publish(current.project, current.recipe, PublishInput.parse(input))
+    if (action === "writeback") return client.writeback(current.project, current.recipe, WritebackInput.parse(input))
+    if (action === "reconcile") return client.reconcile(current.project, current.recipe, ReconcileInput.parse(input))
+    if (action === "issues") return client.issues(current.project, current.recipe, RunInput.parse(input).run)
+    if (action === "resolve") {
+      const value = IssueInput.parse(input)
+      return client.resolve(current.project, value.issue, Resolution.parse(value.resolution))
     }
-    call.reject(new Error(result.error))
-    return true
-  }
-
-  reset() {
-    this.#calls.forEach((call) => call.reject(new Error("Data preparation changed while a request was running")))
-    this.#calls.clear()
+    if (action === "rows") {
+      const value = RowInput.parse(input)
+      return client.rows(current.project, value.dataset, RowsInput.parse(value.input))
+    }
+    if (action === "insert") {
+      const value = RowInput.parse(input)
+      return client.insert(current.project, value.dataset, InsertInput.parse(value.input))
+    }
+    if (action === "edit") {
+      const value = EditRowInput.parse(input)
+      return client.edit(current.project, value.dataset, value.row, EditInput.parse(value.input))
+    }
+    if (action === "remove") {
+      const value = EditRowInput.parse(input)
+      return client.removeRow(current.project, value.dataset, value.row, RemoveInput.parse(value.input))
+    }
+    if (action === "upsert") {
+      const value = RowInput.parse(input)
+      return client.upsert(current.project, value.dataset, UpsertInput.parse(value.input))
+    }
+    if (action === "status") return client.job(current.project, JobInput.parse(input).job)
+    if (action === "cancel") return client.cancel(current.project, JobInput.parse(input).job)
+    if (action === "quota") return client.quota(current.project)
+    if (action === "export") return client.export(current.project)
+    throw new Error(`Unsupported data preparation action: ${action}`)
   }
 }
+
+const RunInput = z.strictObject({ run: Id.optional() })
+const IssueInput = z.strictObject({ issue: Id, resolution: z.unknown() })
+const RowInput = z.strictObject({ dataset: Id, input: z.unknown() })
+const EditRowInput = RowInput.extend({ row: Id })
+const JobInput = z.strictObject({ job: Id })
 
 export function parse(value: unknown) {
   return Incoming.safeParse(value)
@@ -387,4 +431,8 @@ export function ready() {
     methods: ["open", "flush", "invoke"],
     events: ["loaded"],
   })
+}
+
+export function events(project: string) {
+  return client.events(Id.parse(project))
 }

@@ -2,7 +2,7 @@ import { afterEach, beforeAll, describe, expect, test, vi } from "vitest"
 import { z } from "zod"
 
 beforeAll(() => {
-  window.history.replaceState({}, "", "/veritly/workspace?frame=dataprep%3Aproject&parentOrigin=http%3A%2F%2Flocalhost")
+  window.history.replaceState({}, "", "/veritly/workspace?frame=dataprep%3Aproject&parentOrigin=http%3A%2F%2Flocalhost&api=http%3A%2F%2Fdata.localhost")
 })
 
 afterEach(() => vi.restoreAllMocks())
@@ -23,7 +23,7 @@ describe("Veritly preparation protocol", () => {
       frame: "dataprep:project",
       request: 1,
       path: "Sales.prep",
-      payload: { recipe: "recipe" },
+      payload: { recipe: "recipe", project: "project" },
     })
     expect(opens.accept(open)).toBe(true)
     expect(opens.accept(open)).toBe(false)
@@ -40,7 +40,7 @@ describe("Veritly preparation protocol", () => {
       frame: "dataprep:project",
       request: 1,
       path: "Sales.prep",
-      payload: { recipe: "recipe" },
+      payload: { recipe: "recipe", project: "project" },
     }).success).toBe(true)
   })
 
@@ -61,25 +61,30 @@ describe("Veritly preparation protocol", () => {
     })).toThrow("Recommended data rows must start after the header")
   })
 
-  test("owns pending calls and validates results", async () => {
+  test("calls the authenticated data service directly and validates results", async () => {
     const protocol = await import("../../src/veritly/protocol")
-    const post = vi.spyOn(window, "postMessage").mockImplementation(() => undefined)
-    const bridge = new protocol.Bridge(() => "Sales.prep")
-    const result = bridge.invoke("inspect", undefined, z.object({ version: z.number().int().positive() }))
-    const call = post.mock.calls[0]
-    if (!call) throw new Error("Bridge did not post an invocation")
-    const sent = protocol.Outgoing.parse(call[0])
-    if (sent.type !== "invoke") throw new Error("Bridge did not send an invocation")
-    expect(bridge.settle({ type: "result", id: sent.id, ok: true, value: { version: 3 } })).toBe(true)
-    await expect(result).resolves.toEqual({ version: 3 })
+    const fetcher = vi.spyOn(window, "fetch").mockResolvedValue(Response.json({
+      id: "recipe",
+      project: "project",
+      path: "Sales.prep",
+      schema: "sales_abcd1234",
+      source: { kind: "native" },
+      version: 3,
+      state: "draft",
+      commands: [],
+      created: 1,
+      updated: 1,
+    }))
+    const bridge = new protocol.Bridge(() => ({ path: "Sales.prep", project: "project", recipe: "recipe" }))
+    await expect(bridge.invoke("inspect", undefined, z.object({ version: z.number().int().positive() }))).resolves.toEqual({ version: 3 })
+    expect(fetcher).toHaveBeenCalledOnce()
+    expect(fetcher.mock.calls[0]?.[0]).toBe("http://data.localhost/project/project/api/data/preps/recipe")
+    expect(fetcher.mock.calls[0]?.[1]).toMatchObject({ credentials: "include" })
   })
 
-  test("fails pending work when the retained workspace changes", async () => {
+  test("throws unsupported operations without a parent relay", async () => {
     const protocol = await import("../../src/veritly/protocol")
-    vi.spyOn(window, "postMessage").mockImplementation(() => undefined)
-    const bridge = new protocol.Bridge(() => "Sales.prep")
-    const result = bridge.invoke("inspect", undefined, z.object({ version: z.number() }))
-    bridge.reset()
-    await expect(result).rejects.toThrow("changed while a request was running")
+    const bridge = new protocol.Bridge(() => ({ path: "Sales.prep", project: "project", recipe: "recipe" }))
+    expect(() => bridge.invoke("unknown", undefined, z.unknown())).toThrow("Unsupported data preparation action")
   })
 })

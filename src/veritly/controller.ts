@@ -5,6 +5,7 @@ import {
   Datasets,
   Incoming,
   Job,
+  Mapping,
   OpenGuard,
   Preview,
   Profile,
@@ -12,10 +13,11 @@ import {
   Quota,
   Receipt,
   Recipe,
-  Result,
   Row,
   Rows,
   WorkbookCatalog,
+  Workbooks,
+  events,
   frame,
   parent,
   ready,
@@ -50,6 +52,7 @@ import {
   nav,
   output,
   recipe,
+  regionBounds,
   source,
   transform,
   type Command as CommandType,
@@ -67,12 +70,15 @@ import {
 type Core = Omit<StudioState, "gates">
 
 const DatasetInput = z.strictObject({ dataset: z.string().trim().min(1).max(256) })
+const RegionInput = z.number().int().nonnegative()
 const Patch = z.record(z.string(), z.unknown())
 export class PrepStudio {
   readonly #opens = new OpenGuard()
-  readonly #bridge = new Bridge(() => this.#state.value.prep?.path)
+  readonly #bridge = new Bridge(() => this.#state.value.prep)
   readonly #state: BehaviorSubject<StudioState>
   readonly #cursors = new Map<number, string | undefined>()
+  #events?: EventSource
+  #stale = false
   #mounted = false
 
   constructor() {
@@ -80,6 +86,7 @@ export class PrepStudio {
       phase: "idle",
       config: blank(),
       view: nav(),
+      workbooks: Object.freeze([]),
       datasets: Object.freeze([]),
       issues: Object.freeze([]),
       paging: Object.freeze({ page: 0, pageSize: 100 }),
@@ -107,6 +114,9 @@ export class PrepStudio {
   unmount() {
     if (!this.#mounted) throw new Error("Data preparation controller is not mounted")
     window.removeEventListener("message", this.#receive)
+    this.#events?.close()
+    this.#events = undefined
+    this.#stale = false
     this.#bridge.reset()
     this.#mounted = false
     this.#next({ phase: "idle", busy: undefined })
@@ -120,11 +130,43 @@ export class PrepStudio {
     return selected
   }
 
+  sheet(input: unknown) {
+    const name = z.string().trim().min(1).max(31).parse(input)
+    const book = need(this.get().catalog, "Workbook catalog is not loaded")
+    const selected = bounds(book, name)
+    this.#next({ config: selected, view: Object.freeze({ ...this.get().view, surface: "source" }) })
+    return selected
+  }
+
+  region(input: unknown) {
+    const index = RegionInput.parse(input)
+    const book = need(this.get().catalog, "Workbook catalog is not loaded")
+    const sheet = book.sheets.find((item) => item.name === this.get().config.sheet)
+    if (!sheet) throw new Error(`Workbook worksheet is unavailable: ${this.get().config.sheet}`)
+    const region = sheet.regions[index]
+    if (!region) throw new Error(`Workbook region is unavailable: ${index}`)
+    const selected = regionBounds(sheet.name, region)
+    this.#next({ config: selected, view: Object.freeze({ ...this.get().view, surface: "source" }) })
+    return selected
+  }
+
+  rebind(input: unknown) {
+    this.#assert(this.get().gates.rebind)
+    const workbook = z.string().trim().min(1).max(1024).parse(input)
+    return this.#run("rebind", async () => {
+      const prep = need(this.get().recipe, "Preparation recipe is not loaded")
+      await this.#invoke("rebind", { expectedVersion: prep.version, workbook }, Recipe)
+      await this.#refresh(true)
+      return need(this.get().recipe, "Rebound preparation is not loaded")
+    })
+  }
+
   view(input: unknown) {
     const value = ViewInput.parse(input)
     const current = this.get().view
     const next = View.parse({
       ribbon: value.ribbon === undefined ? current.ribbon : value.ribbon,
+      surface: value.surface === undefined ? current.surface : value.surface,
       detail: value.detail === undefined ? current.detail : value.detail,
       ...((Object.hasOwn(value, "step") ? value.step : current.step) === undefined ? {} : {
         step: Object.hasOwn(value, "step") ? value.step : current.step,
@@ -282,7 +324,7 @@ export class PrepStudio {
         preview: value,
         issues: Object.freeze([...issues]),
         paging: Object.freeze({ page: 0, pageSize: 100 }),
-        view: Object.freeze({ ...this.get().view, detail: "profile", dataset: value.dataset }),
+        view: Object.freeze({ ...this.get().view, surface: "map", detail: "profile", dataset: value.dataset }),
       })
     })
   }
@@ -439,12 +481,14 @@ export class PrepStudio {
     }))
   }
 
-  ai() {
-    this.#assert(this.get().gates.ai)
+  ai(input: unknown) {
+    const intent = z.enum(["configure", "explain", "fix"]).parse(input)
+    if (intent === "fix") this.#assert(this.get().gates.ai)
     const prep = need(this.get().prep, "Data preparation is not open")
     send({
       type: "veritly.data.ai",
       path: prep.path,
+      intent,
       issues: this.get().issues.filter((item) => item.state === "open").map((item) => item.id),
     })
   }
@@ -458,10 +502,6 @@ export class PrepStudio {
     const parsed = Incoming.safeParse(event.data)
     if (!parsed.success) return
     const data = parsed.data
-    if (data.type === "result") {
-      this.#bridge.settle(Result.parse(data))
-      return
-    }
     if (data.frame !== frame) return
     if (data.type === "veritly.iframe.open") {
       if (!this.#opens.accept(data)) {
@@ -499,9 +539,11 @@ export class PrepStudio {
     this.#cursors.set(0, undefined)
     this.#next({
       phase: "loading",
-      prep: Object.freeze({ path: input.path, recipe: input.payload.recipe }),
+      prep: Object.freeze({ path: input.path, recipe: input.payload.recipe, project: input.payload.project }),
       recipe: undefined,
       catalog: undefined,
+      workbooks: Object.freeze([]),
+      mapping: undefined,
       config: blank(),
       view: nav(),
       draft: undefined,
@@ -516,20 +558,26 @@ export class PrepStudio {
       error: undefined,
       paging: Object.freeze({ page: 0, pageSize: 100 }),
     })
+    this.#listen(input.payload.project)
     send({ type: "veritly.iframe.loaded", frame, request: input.request, path: input.path })
     void this.#load(input.path).then(
-      () => this.#next({ phase: "ready", busy: undefined }),
+      () => {
+        this.#next({ phase: "ready", busy: undefined })
+        this.#drain()
+      },
       (error: unknown) => this.#fail(error, input.path),
     )
   }
 
   async #load(path: string) {
     const wire = await this.#invoke("inspect", undefined, Recipe)
-    const [project, list, issues, book] = await Promise.all([
+    const [project, list, issues, book, books, mapping] = await Promise.all([
       this.#invoke("project", undefined, Project),
       this.#invoke("datasets", undefined, Datasets),
       this.#invoke("issues", {}, IssueList),
       wire.source.kind === "workbook" ? this.#invoke("workbook", undefined, WorkbookCatalog) : Promise.resolve(undefined),
+      this.#invoke("workbooks", undefined, Workbooks),
+      this.#invoke("mapping", undefined, Mapping),
     ])
     if (this.get().prep?.path !== path) throw new Error(`Data preparation changed while opening ${path}`)
     const prep = recipe(wire)
@@ -541,6 +589,8 @@ export class PrepStudio {
     this.#next({
       recipe: prep,
       catalog: cataloged,
+      workbooks: Object.freeze([...books.workbooks]),
+      mapping,
       config: cataloged && !source(prep) ? bounds(cataloged) : config(prep),
       view: nav(prep),
       quota: Quota.parse(project.quota),
@@ -550,13 +600,15 @@ export class PrepStudio {
     await this.#database(prep, list.datasets)
   }
 
-  async #refresh() {
+  async #refresh(reset = false) {
     const wire = await this.#invoke("inspect", undefined, Recipe)
-    const [project, list, issues, book] = await Promise.all([
+    const [project, list, issues, book, books, mapping] = await Promise.all([
       this.#invoke("project", undefined, Project),
       this.#invoke("datasets", undefined, Datasets),
       this.#invoke("issues", {}, IssueList),
       wire.source.kind === "workbook" ? this.#invoke("workbook", undefined, WorkbookCatalog) : Promise.resolve(undefined),
+      this.#invoke("workbooks", undefined, Workbooks),
+      this.#invoke("mapping", undefined, Mapping),
     ])
     const prep = recipe(wire)
     const cataloged = book ? catalog(book) : undefined
@@ -567,6 +619,9 @@ export class PrepStudio {
     this.#next({
       recipe: prep,
       catalog: cataloged,
+      config: reset && cataloged ? bounds(cataloged) : this.get().config,
+      workbooks: Object.freeze([...books.workbooks]),
+      mapping,
       quota: Quota.parse(project.quota),
       datasets: Object.freeze([...list.datasets]),
       issues: Object.freeze([...issues]),
@@ -657,16 +712,18 @@ export class PrepStudio {
     return Promise.resolve().then(work).then(
       (value) => {
         this.#next({ busy: undefined })
+        this.#drain()
         return value
       },
       (error: unknown) => {
         this.#next({ busy: undefined, error: message(error) })
+        this.#drain()
         throw error
       },
     )
   }
 
-  #invoke<T>(action: string, input: unknown, schema: z.ZodType<T>) {
+  #invoke<T>(action: string, input: unknown, schema: { parse(value: unknown): T }) {
     return this.#bridge.invoke(action, input, schema)
   }
 
@@ -679,6 +736,36 @@ export class PrepStudio {
   #fail(error: unknown, path: string) {
     if (this.get().prep?.path !== path) return
     this.#next({ phase: "ready", busy: undefined, error: message(error) })
+  }
+
+  #listen(project: string) {
+    this.#events?.close()
+    const source = new EventSource(events(project), { withCredentials: true })
+    source.addEventListener("project", this.#changed)
+    source.addEventListener("job", this.#changed)
+    source.addEventListener("issue", this.#changed)
+    this.#events = source
+  }
+
+  readonly #changed = () => {
+    this.#stale = true
+    this.#drain()
+  }
+
+  #drain() {
+    if (!this.#stale || this.get().busy || this.get().phase !== "ready") return
+    this.#stale = false
+    this.#next({ busy: "open", error: undefined })
+    void this.#refresh().then(
+      () => {
+        this.#next({ busy: undefined })
+        this.#drain()
+      },
+      (error: unknown) => {
+        this.#next({ busy: undefined, error: message(error) })
+        this.#drain()
+      },
+    )
   }
 
   #assert(gate: StudioGate) {

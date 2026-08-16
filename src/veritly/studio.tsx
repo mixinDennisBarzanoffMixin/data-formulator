@@ -1,11 +1,14 @@
 import AddIcon from "@mui/icons-material/Add"
 import AutoFixHighIcon from "@mui/icons-material/AutoFixHigh"
+import AccountTreeIcon from "@mui/icons-material/AccountTree"
+import ArrowForwardIcon from "@mui/icons-material/ArrowForward"
 import CloudUploadIcon from "@mui/icons-material/CloudUpload"
 import CompareArrowsIcon from "@mui/icons-material/CompareArrows"
 import DataObjectIcon from "@mui/icons-material/DataObject"
 import DeleteIcon from "@mui/icons-material/Delete"
 import DownloadIcon from "@mui/icons-material/Download"
 import ErrorOutlineIcon from "@mui/icons-material/ErrorOutline"
+import FactCheckIcon from "@mui/icons-material/FactCheck"
 import GridViewIcon from "@mui/icons-material/GridView"
 import KeyIcon from "@mui/icons-material/Key"
 import RefreshIcon from "@mui/icons-material/Refresh"
@@ -98,7 +101,7 @@ export function App() {
       <CssBaseline />
       <Box className="studio">
         <Header model={model} state={state} />
-        <Ribbon model={model} state={state} />
+        <Navigation model={model} state={state} />
         <Box className="studio-alert">
           {state.error && <Alert severity="error" onClose={() => model.clear()}>{state.error}</Alert>}
         </Box>
@@ -118,7 +121,6 @@ function Header({ model, state }: ViewProps) {
   if (!state.prep) throw new Error("Data preparation header requires an open workflow")
   const recipe = state.recipe
   const published = recipe?.state === "published"
-  const mode = recipe?.source.kind === "native" ? "replace" : "upsert"
   return (
     <Box className="studio-header">
       <Box className="studio-title">
@@ -132,138 +134,108 @@ function Header({ model, state }: ViewProps) {
         {recipe && <Chip size="small" label={stateLabel(recipe.state)} color={published ? "success" : "default"} />}
       </Box>
       <Box className="studio-actions">
+        <Button startIcon={<AutoFixHighIcon />} onClick={() => model.ai("configure")}>Configure with AI</Button>
+        <Button onClick={() => model.ai("explain")}>Explain mapping</Button>
         <Action gate={state.gates.writeback} label="Write back">
           <Button startIcon={<SaveAltIcon />} onClick={() => act(model.writeback())}>Write back</Button>
         </Action>
         <Action gate={state.gates.reconcile} label="Reconcile">
           <Button startIcon={<CompareArrowsIcon />} onClick={() => act(model.reconcile())}>Reconcile</Button>
         </Action>
-        <Action gate={state.gates.publish} label="Publish">
-          <Button variant="contained" startIcon={<CloudUploadIcon />} onClick={() => act(model.publish({ mode }))}>
-            Publish
-          </Button>
-        </Action>
       </Box>
     </Box>
   )
 }
 
-function Ribbon({ model, state }: ViewProps) {
+function Navigation({ model, state }: ViewProps) {
   const dataset = state.view.dataset
   return (
     <Box className="ribbon">
       <Tabs
         className="ribbon-tabs"
-        value={state.view.ribbon}
-        onChange={(_, value: StudioState["view"]["ribbon"]) => model.view({ ribbon: value })}
+        value={state.view.surface}
+        onChange={(_, surface: StudioState["view"]["surface"]) => model.view({ surface })}
       >
-        <Tab value="home" label="Home" />
-        <Tab value="transform" label="Transform" disabled={!state.gates.transform.enabled} />
-        <Tab value="column" label="Add column" disabled={!state.gates.transform.enabled} />
-        <Tab
-          value="combine"
-          disabled
-          label={<Tooltip title="Join, union, and pivot editors are not implemented yet"><span>Combine</span></Tooltip>}
-        />
-        <Tab value="view" label="View" />
+        <Tab value="source" label="1  Source" />
+        <Tab value="map" label="2  Map" disabled={!state.recipe?.commands.length} />
+        <Tab value="model" label="3  Model" disabled={!state.recipe?.commands.length} />
+        <Tab value="rows" label="4  Rows" disabled={!state.preview} />
+        <Tab value="review" label="5  Review" disabled={!state.recipe?.commands.length} />
       </Tabs>
       <Box className="ribbon-tools">
-        {state.view.ribbon === "home" && <Home model={model} state={state} dataset={dataset} />}
-        {state.view.ribbon === "transform" && <TransformTools model={model} state={state} />}
-        {state.view.ribbon === "column" && <ColumnTools model={model} state={state} />}
-        {state.view.ribbon === "view" && <Views model={model} state={state} />}
+        {state.view.surface === "source" && (
+          <Box className="ribbon-group">
+            <Action gate={state.gates.prepare} label="Analyze the selected worksheet region">
+              <Button variant="contained" startIcon={<TableChartIcon />} onClick={() => act(model.prepare())}>
+                Analyze selection
+              </Button>
+            </Action>
+            <Typography color="text.secondary" fontSize={11}>One selected Excel row becomes one PostgreSQL row.</Typography>
+          </Box>
+        )}
+        {state.view.surface === "map" && <MapTools model={model} state={state} />}
+        {state.view.surface === "model" && (
+          <Box className="ribbon-group"><Typography color="text.secondary" fontSize={11}>Tables, keys, and relationships</Typography></Box>
+        )}
+        {state.view.surface === "rows" && <RowTools model={model} state={state} dataset={dataset} />}
+        {state.view.surface === "review" && <ReviewTools model={model} state={state} />}
       </Box>
     </Box>
   )
 }
 
-function TransformTools({ model, state }: ViewProps) {
+function MapTools({ model, state }: ViewProps) {
   return (
     <>
       <Box className="ribbon-group">
-        <Typography color="text.secondary" fontSize={11}>Text</Typography>
         <Action gate={state.gates.transform} label="Trim values"><Button onClick={() => model.openTransform("trim")}>Trim</Button></Action>
         <Action gate={state.gates.transform} label="Change case"><Button onClick={() => model.openTransform("case")}>Change case</Button></Action>
         <Action gate={state.gates.transform} label="Rename column"><Button onClick={() => model.openTransform("rename")}>Rename</Button></Action>
-      </Box>
-      <Box className="ribbon-group">
-        <Typography color="text.secondary" fontSize={11}>Type</Typography>
         <Action gate={state.gates.transform} label="Change data type"><Button onClick={() => model.openTransform("cast")}>Data type</Button></Action>
+        <Action gate={state.gates.transform} label="Add custom column"><Button onClick={() => model.openTransform("derive")}>Custom column</Button></Action>
       </Box>
     </>
   )
 }
 
-function ColumnTools({ model, state }: ViewProps) {
-  return (
-    <Box className="ribbon-group">
-      <Typography color="text.secondary" fontSize={11}>Expression</Typography>
-      <Action gate={state.gates.transform} label="Add custom column"><Button onClick={() => model.openTransform("derive")}>Custom column</Button></Action>
-    </Box>
-  )
-}
-
-function Home({ model, state, dataset }: ViewProps & { dataset?: string }) {
+function RowTools({ model, state, dataset }: ViewProps & { dataset?: string }) {
   return (
     <>
       <Box className="ribbon-group">
-        <Action gate={state.gates.prepare} label="Profile and preview source">
-          <Button variant="outlined" startIcon={<TableChartIcon />} onClick={() => act(model.prepare())}>
-            Profile & preview
-          </Button>
-        </Action>
-        <Button
-          startIcon={<RefreshIcon />}
-          disabled={!dataset || Boolean(state.busy)}
-          onClick={() => dataset && act(model.preview({ dataset, limit: 100 }))}
-        >
-          Refresh
+        <Button startIcon={<RefreshIcon />} disabled={!dataset || Boolean(state.busy)} onClick={() => dataset && act(model.preview({ dataset, limit: 100 }))}>
+          Refresh rows
         </Button>
         <Action gate={state.gates.profile} label="Profile the selected query">
-          <Button startIcon={<TableChartIcon />} onClick={() => dataset && act(model.profile(dataset))}>Run profile</Button>
+          <Button startIcon={<TableChartIcon />} onClick={() => dataset && act(model.profile(dataset))}>Profile columns</Button>
         </Action>
+        <Action gate={state.gates.insert} label="Add database row"><Button startIcon={<AddIcon />} onClick={() => model.draft({})}>New row</Button></Action>
+        <Action gate={state.gates.export} label="Export project database"><Button startIcon={<DownloadIcon />} onClick={() => act(model.export())}>Export</Button></Action>
       </Box>
       <Box className="ribbon-group">
-        <Action gate={state.gates.insert} label="Add database row">
-          <Button startIcon={<AddIcon />} onClick={() => model.draft({})}>New row</Button>
-        </Action>
-        <Action gate={state.gates.export} label="Export project database">
-          <Button startIcon={<DownloadIcon />} onClick={() => act(model.export())}>Export</Button>
-        </Action>
-      </Box>
-      <Box className="ribbon-group">
-        <Typography color="text.secondary" fontSize={11}>Publish mode</Typography>
-        <ButtonGroup size="small" disabled={!state.gates.publish.enabled}>
-          <Button onClick={() => act(model.publish({ mode: "replace" }))}>Replace</Button>
-          <Button onClick={() => act(model.publish({ mode: "append" }))}>Append</Button>
-          <Button onClick={() => act(model.publish({ mode: "upsert" }))}>Upsert</Button>
-        </ButtonGroup>
-      </Box>
-      <Box className="ribbon-group">
-        <Action gate={state.gates.ai} label="Fix diagnostics with AI">
-          <Button startIcon={<AutoFixHighIcon />} onClick={() => model.ai()}>Fix with AI</Button>
-        </Action>
-        <Action gate={state.gates.cancel} label="Cancel running job">
-          <Button color="error" onClick={() => act(model.cancel())}>Cancel job</Button>
-        </Action>
+        <Button onClick={() => model.view({ detail: "profile" })}>Profile</Button>
+        <Button onClick={() => model.view({ detail: "issues" })}>Issues</Button>
+        <Button onClick={() => model.view({ detail: "jobs" })}>Job</Button>
       </Box>
     </>
   )
 }
 
-function Views({ model, state }: ViewProps) {
+function ReviewTools({ model, state }: ViewProps) {
   return (
-    <Box className="ribbon-group">
-      <Button variant={state.view.detail === "profile" ? "contained" : "text"} onClick={() => model.view({ detail: "profile" })}>
-        Column profile
-      </Button>
-      <Button variant={state.view.detail === "issues" ? "contained" : "text"} onClick={() => model.view({ detail: "issues" })}>
-        Issues
-      </Button>
-      <Button variant={state.view.detail === "jobs" ? "contained" : "text"} onClick={() => model.view({ detail: "jobs" })}>
-        Job
-      </Button>
-    </Box>
+    <>
+      <Box className="ribbon-group">
+        <Typography color="text.secondary" fontSize={11}>Publish workbook rows to PostgreSQL</Typography>
+        <ButtonGroup size="small" disabled={!state.gates.publish.enabled}>
+          <Button onClick={() => act(model.publish({ mode: "replace" }))}>Replace</Button>
+          <Button onClick={() => act(model.publish({ mode: "append" }))}>Append</Button>
+          <Button variant="contained" startIcon={<CloudUploadIcon />} onClick={() => act(model.publish({ mode: "upsert" }))}>Upsert</Button>
+        </ButtonGroup>
+      </Box>
+      <Box className="ribbon-group">
+        <Action gate={state.gates.ai} label="Fix diagnostics with AI"><Button startIcon={<AutoFixHighIcon />} onClick={() => model.ai("fix")}>Fix issues with AI</Button></Action>
+        <Action gate={state.gates.cancel} label="Cancel running job"><Button color="error" onClick={() => act(model.cancel())}>Cancel job</Button></Action>
+      </Box>
+    </>
   )
 }
 
@@ -275,7 +247,11 @@ function Queries({ model, state }: ViewProps) {
     <Box className="queries">
       <Box className="pane-title"><Typography fontSize={12} fontWeight={650}>Queries</Typography></Box>
       <Box className="pane-scroll">
-        <button className="query-row" type="button">
+        <button
+          className={`query-row${state.view.surface === "source" ? " selected" : ""}`}
+          type="button"
+          onClick={() => model.view({ surface: "source" })}
+        >
           {recipe.source.kind === "workbook" ? <TableChartIcon fontSize="small" /> : <StorageIcon fontSize="small" />}
           <Box minWidth={0}>
             <Typography fontSize={12} fontWeight={600} noWrap>
@@ -324,6 +300,17 @@ function Queries({ model, state }: ViewProps) {
 
 function Workspace({ model, state }: ViewProps) {
   const command = state.recipe?.commands.find((item) => item.id === state.view.step)
+  const content = state.view.surface === "source"
+    ? <Source model={model} state={state} />
+    : state.view.surface === "map"
+      ? <Mapping model={model} state={state} />
+      : state.view.surface === "model"
+        ? <Model state={state} />
+        : state.view.surface === "review"
+          ? <Review state={state} />
+          : state.preview
+            ? <Grid model={model} state={state} preview={state.preview} />
+            : <Empty title="No row preview" detail="Analyze a workbook selection or load a published table." />
   return (
     <Box className="workspace">
       <Box className="formula">
@@ -333,9 +320,11 @@ function Workspace({ model, state }: ViewProps) {
         </Typography>
       </Box>
       <Box className="grid-shell">
-        {state.preview ? <Grid model={model} state={state} preview={state.preview} /> : <Source model={model} state={state} />}
+        {content}
       </Box>
-      <Details model={model} state={state} />
+      {state.view.surface === "rows" || state.view.surface === "review"
+        ? <Details model={model} state={state} />
+        : <Guide state={state} />}
     </Box>
   )
 }
@@ -370,7 +359,8 @@ function Grid({ model, state, preview }: ViewProps & { preview: Preview }) {
 function Source({ model, state }: ViewProps) {
   const recipe = state.recipe
   if (!recipe) return <Box className="waiting"><CircularProgress size={22} /></Box>
-  if (recipe.source.kind === "native") {
+  const source = recipe.source
+  if (source.kind === "native") {
     return (
       <Box className="waiting">
         <StorageIcon color="primary" />
@@ -378,83 +368,265 @@ function Source({ model, state }: ViewProps) {
       </Box>
     )
   }
+  const sheet = state.catalog?.sheets.find((item) => item.name === state.config.sheet)
   return (
-    <Box height="100%" overflow="auto" bgcolor="#fff" border="1px solid #d4d4d4">
-      <Box className="source-card">
-        <Stack direction="row" alignItems="center" gap={1} mb={1.5}>
+    <Box className="source-workspace">
+      <Box className="source-book">
+        <Box className="source-book-title">
           <TableChartIcon color="primary" />
-          <Box>
-            <Typography fontSize={14} fontWeight={650}>Select workbook data</Typography>
-            <Typography color="text.secondary" fontSize={11}>{recipe.source.path}</Typography>
+          <Box minWidth={0}>
+            <Typography fontSize={13} fontWeight={700} noWrap>{name(source.path)}</Typography>
+            <Typography color="text.secondary" fontSize={10} noWrap>Immutable revision {source.revision}</Typography>
           </Box>
-        </Stack>
-        <Box className="source-fields">
-          <FormControl className="wide" size="small">
-            <InputLabel id="worksheet-label">Worksheet</InputLabel>
-            <Select
-              labelId="worksheet-label"
-              label="Worksheet"
-              value={state.config.sheet}
-              onChange={(event) => select(model, state.config, { sheet: event.target.value })}
-            >
-              {state.catalog?.sheets.map((sheet) => (
-                <MenuItem key={sheet.name} value={sheet.name}>
-                  {sheet.name}{sheet.visibility === "visible" ? "" : ` (${label(sheet.visibility)})`}
-                </MenuItem>
-              ))}
-            </Select>
-          </FormControl>
-          <TextField
-            size="small"
-            type="number"
-            label="Header row"
-            value={state.config.header}
-            onChange={(event) => select(model, state.config, { header: Number(event.target.value) })}
-          />
-          <TextField
-            size="small"
-            type="number"
-            label="First data row"
-            value={state.config.start}
-            onChange={(event) => select(model, state.config, { start: Number(event.target.value) })}
-          />
-          <TextField
-            size="small"
-            label="First column"
-            value={letters(state.config.columns[0])}
-            onChange={(event) => select(model, state.config, { columns: span(index(event.target.value), last(state.config.columns)) })}
-          />
-          <TextField
-            size="small"
-            label="Last column"
-            value={letters(last(state.config.columns))}
-            onChange={(event) => select(model, state.config, { columns: span(state.config.columns[0], index(event.target.value)) })}
-          />
-          <TextField
-            className="wide"
-            size="small"
-            type="number"
-            label="Last data row"
-            value={state.config.end}
-            onChange={(event) => select(model, state.config, { end: Number(event.target.value) })}
-          />
-          <TextField
-            className="wide"
-            size="small"
-            label="Business key"
-            helperText="Leave blank to add a visible Veritly ID column."
-            value={state.config.keys.join(", ")}
-            onChange={(event) => select(model, state.config, { keys: names(event.target.value) })}
-          />
         </Box>
-        <Stack direction="row" justifyContent="flex-end" mt={2}>
-          <Action gate={state.gates.prepare} label="Profile and preview source">
-            <Button variant="contained" onClick={() => act(model.prepare())}>Profile & preview</Button>
+        <Box className="source-workbook">
+          <FormControl fullWidth size="small">
+            <InputLabel id="workbook-label">Workbook</InputLabel>
+            <Tooltip title={state.gates.rebind.enabled ? "Choose another project workbook" : state.gates.rebind.reason}>
+              <Select
+                labelId="workbook-label"
+                label="Workbook"
+                value={source.path}
+                disabled={!state.gates.rebind.enabled}
+                onChange={(event) => {
+                  if (event.target.value === source.path) return
+                  act(model.rebind(event.target.value))
+                }}
+              >
+                {state.workbooks.map((workbook) => (
+                  <MenuItem key={workbook.file} value={workbook.path}>{name(workbook.path)} · r{workbook.revision}</MenuItem>
+                ))}
+              </Select>
+            </Tooltip>
+          </FormControl>
+        </Box>
+        <Typography className="source-label">WORKSHEETS</Typography>
+        <Box className="source-sheets">
+          {state.catalog?.sheets.map((item) => (
+            <button
+              className={`source-sheet${item.name === state.config.sheet ? " selected" : ""}`}
+              key={item.name}
+              type="button"
+              onClick={() => model.sheet(item.name)}
+            >
+              <TableChartIcon fontSize="small" />
+              <Box minWidth={0}>
+                <Typography fontSize={11} fontWeight={600} noWrap>{item.name}</Typography>
+                <Typography color="text.secondary" fontSize={9} noWrap>
+                  {item.regions.length} suggested {item.regions.length === 1 ? "table" : "tables"}
+                  {item.visibility === "visible" ? "" : ` · ${label(item.visibility)}`}
+                </Typography>
+              </Box>
+            </button>
+          ))}
+        </Box>
+      </Box>
+      <Box className="source-main">
+        <Box className="section-head">
+          <Box>
+            <Typography fontSize={15} fontWeight={700}>Choose a table-like region</Typography>
+            <Typography color="text.secondary" fontSize={11}>Only this bounded range becomes row-level project data. Everything else remains untouched.</Typography>
+          </Box>
+          <Action gate={state.gates.prepare} label="Analyze the selected range">
+            <Button variant="contained" startIcon={<TableChartIcon />} onClick={() => act(model.prepare())}>Analyze selection</Button>
           </Action>
-        </Stack>
+        </Box>
+        {!sheet?.regions.length && (
+          <Alert severity="info">This worksheet has no detected table-like region. Choose another worksheet.</Alert>
+        )}
+        <Box className="region-grid">
+          {sheet?.regions.map((region, offset) => {
+            const active = state.config.header === region.header && state.config.start === region.start &&
+              state.config.end === region.end && state.config.columns[0] === region.left && last(state.config.columns) === region.right
+            return (
+              <button
+                className={`region-card${active ? " selected" : ""}`}
+                key={`${region.header}:${region.left}:${region.right}`}
+                type="button"
+                onClick={() => model.region(offset)}
+              >
+                <Box className="region-preview">
+                  <Box className="region-header" />
+                  {Array.from({ length: 12 }, (_, cell) => <Box key={cell} className="region-cell" />)}
+                </Box>
+                <Box className="region-meta">
+                  <Typography fontSize={12} fontWeight={700}>Suggested table {offset + 1}</Typography>
+                  <Typography color="text.secondary" fontSize={10}>
+                    {letters(region.left)}{region.header}:{letters(region.right)}{region.end} · {(region.end - region.start + 1).toLocaleString()} rows
+                  </Typography>
+                  <Chip size="small" color={active ? "primary" : "default"} label={active ? "Selected" : "Select range"} />
+                </Box>
+              </button>
+            )
+          })}
+        </Box>
+        {sheet?.regions.length ? (
+          <Box className="range-settings">
+            <Box>
+              <Typography fontSize={12} fontWeight={650}>Row identity</Typography>
+              <Typography color="text.secondary" fontSize={10}>Choose immutable business keys, or leave empty to create a visible Veritly ID.</Typography>
+            </Box>
+            <TextField
+              size="small"
+              label="Business key columns"
+              placeholder="Customer ID"
+              value={state.config.keys.join(", ")}
+              onChange={(event) => select(model, state.config, { keys: names(event.target.value) })}
+            />
+          </Box>
+        ) : undefined}
       </Box>
     </Box>
   )
+}
+
+function Mapping({ model, state }: ViewProps) {
+  const recipe = state.recipe
+  const target = recipe ? recipeOutput(recipe) : undefined
+  const source = recipe?.commands.find((item) => item.kind === "source")
+  if (!recipe || !target || !source || source.kind !== "source") {
+    return <Empty title="No mapping yet" detail="Choose and analyze a workbook region to create the row and column mapping." />
+  }
+  const mapped = state.mapping?.targets.find((item) => item.command === target.id)
+  const columns = mapped
+    ? mapped.columns.map((column) => ({
+      id: column.target,
+      source: column.source,
+      target: column.target,
+      type: column.type,
+      owner: column.owner,
+      key: column.key,
+      direction: column.direction,
+    }))
+    : state.preview
+      ? state.preview.columns.filter((item) => !item.system).map((column) => ({
+        id: column.id,
+        source: column.name,
+        target: column.name,
+        type: column.type,
+        owner: column.owner,
+        key: Boolean(column.key),
+        direction: column.owner === "formula" || column.owner === "derived" ? "read_only" as const : "bidirectional" as const,
+      }))
+      : []
+  return (
+    <Box className="mapping">
+      <Box className="mapping-head">
+        <NodeCard icon={<TableChartIcon />} eyebrow="XLSX SOURCE" title={source.sheet} detail={`${letters(source.range.left)}${source.range.header}:${letters(source.range.right)}${source.range.end}`} />
+        <Box className="mapping-flow"><ArrowForwardIcon /><Typography fontSize={10}>1 source row = 1 entity row</Typography></Box>
+        <NodeCard icon={<StorageIcon />} eyebrow="POSTGRESQL TARGET" title={`${target.schema}.${target.table}`} detail={`${target.class} table`} />
+      </Box>
+      <Box className="mapping-table">
+        <Box className="mapping-row mapping-labels">
+          <Typography>Workbook column</Typography><Typography>Transform</Typography><Typography>PostgreSQL column</Typography><Typography>Ownership</Typography>
+        </Box>
+        {columns.map((column) => (
+          <Box className="mapping-row" key={column.id}>
+            <Stack direction="row" alignItems="center" gap={1} minWidth={0}>
+              {column.key ? <KeyIcon color="primary" fontSize="small" /> : <Typography className="type-glyph">{glyph(column.type ? column.type : "text")}</Typography>}
+              <Typography fontSize={11} fontWeight={600} noWrap>{column.source ? column.source : "Generated"}</Typography>
+            </Stack>
+            <Stack direction="row" alignItems="center" gap={0.5}><Divider sx={{ flex: 1 }} /><ArrowForwardIcon color="disabled" fontSize="small" /><Divider sx={{ flex: 1 }} /></Stack>
+            <Stack direction="row" alignItems="center" gap={1} minWidth={0}>
+              <Typography className="type-glyph">{glyph(column.type ? column.type : "text")}</Typography>
+              <Typography fontSize={11} fontWeight={600} noWrap>{column.target}</Typography>
+              <Chip size="small" label={column.type ? label(column.type) : "Inferred"} />
+            </Stack>
+            <Stack alignItems="flex-start" gap={0.25}>
+              <Chip size="small" variant="outlined" color={column.owner === "formula" ? "warning" : "default"} label={label(column.owner)} />
+              <Typography color="text.secondary" fontSize={8}>{label(column.direction)}</Typography>
+            </Stack>
+          </Box>
+        ))}
+        {!columns.length && <Box p={3}><Typography color="text.secondary" fontSize={11}>Load the preview to inspect typed column mappings.</Typography></Box>}
+      </Box>
+      <Box className="mapping-note">
+        {mapped?.invertible === false ? <ErrorOutlineIcon color="warning" fontSize="small" /> : <KeyIcon color="primary" fontSize="small" />}
+        <Typography fontSize={11}>
+          {mapped?.invertible === false
+            ? mapped.blockers.map((blocker) => blocker.message).join(" · ")
+            : target.keys.length ? `Row identity: ${target.keys.join(", ")}` : "Row identity is not configured"}
+        </Typography>
+        <Button startIcon={<AutoFixHighIcon />} onClick={() => model.ai("configure")}>Change with AI</Button>
+      </Box>
+    </Box>
+  )
+}
+
+function Model({ state }: { state: StudioState }) {
+  const recipe = state.recipe
+  const target = recipe ? recipeOutput(recipe) : undefined
+  const dataset = state.datasets.find((item) => item.prep === recipe?.id)
+  if (!recipe || !target) return <Empty title="No model yet" detail="Analyze a source before modeling tables and relationships." />
+  const columns = dataset ? dataset.columns : state.preview ? state.preview.columns : []
+  return (
+    <Box className="model-canvas">
+      <Box className="model-table">
+        <Box className="model-title"><StorageIcon /><Typography fontSize={12} fontWeight={700}>{target.schema}.{target.table}</Typography><Chip size="small" label={target.class} /></Box>
+        {columns.filter((item) => !item.system).map((column) => (
+          <Box className="model-column" key={column.id}>
+            {target.keys.includes(column.name) ? <KeyIcon color="primary" fontSize="small" /> : <Typography className="type-glyph">{glyph(column.type)}</Typography>}
+            <Typography fontSize={11} flex={1} noWrap>{column.name}</Typography>
+            <Typography color="text.secondary" fontSize={9}>{label(column.type)}</Typography>
+          </Box>
+        ))}
+      </Box>
+      <Box className="model-empty">
+        <AccountTreeIcon color="disabled" sx={{ fontSize: 46 }} />
+        <Typography fontSize={13} fontWeight={650}>One row-level entity table</Typography>
+        <Typography color="text.secondary" fontSize={11}>Joins and derived tables appear here without replacing the original transaction rows.</Typography>
+      </Box>
+    </Box>
+  )
+}
+
+function Review({ state }: { state: StudioState }) {
+  const recipe = state.recipe
+  const target = recipe ? recipeOutput(recipe) : undefined
+  const source = recipe?.commands.find((item) => item.kind === "source")
+  if (!recipe || !target || !source || source.kind !== "source") return <Empty title="Nothing to review" detail="Analyze a workbook range first." />
+  const checks = [
+    { title: "Bounded workbook range", detail: `${source.sheet}!${letters(source.range.left)}${source.range.header}:${letters(source.range.right)}${source.range.end}`, ok: true },
+    { title: "Row identity", detail: target.keys.join(", "), ok: target.keys.length > 0 },
+    { title: "Typed row preview", detail: state.preview ? `${state.preview.total.toLocaleString()} rows · ${state.preview.columns.length} columns` : "Not loaded", ok: Boolean(state.preview) },
+    { title: "Diagnostics", detail: state.issues.length ? `${state.issues.length} open issues` : "No blocking issues", ok: !state.issues.some((item) => item.severity === "error") },
+  ]
+  return (
+    <Box className="review">
+      <Box className="review-summary">
+        <FactCheckIcon color="primary" sx={{ fontSize: 34 }} />
+        <Box><Typography fontSize={15} fontWeight={700}>Review before publication</Typography><Typography color="text.secondary" fontSize={11}>Publication is explicit. The workbook stays intact and PostgreSQL receives one row per selected Excel row.</Typography></Box>
+      </Box>
+      <Box className="review-grid">
+        {checks.map((check) => (
+          <Box className="review-check" key={check.title}>
+            <Box className={`review-mark ${check.ok ? "ok" : "warn"}`}>{check.ok ? "✓" : "!"}</Box>
+            <Box><Typography fontSize={11} fontWeight={650}>{check.title}</Typography><Typography color="text.secondary" fontSize={10}>{check.detail}</Typography></Box>
+          </Box>
+        ))}
+      </Box>
+      <Box className="publish-target"><StorageIcon color="primary" /><Box><Typography fontSize={11} fontWeight={700}>{target.schema}.{target.table}</Typography><Typography color="text.secondary" fontSize={10}>Stable PostgreSQL target · {target.class}</Typography></Box></Box>
+    </Box>
+  )
+}
+
+function NodeCard({ icon, eyebrow, title, detail }: { icon: React.ReactNode; eyebrow: string; title: string; detail: string }) {
+  return (
+    <Box className="node-card">{icon}<Box minWidth={0}><Typography className="node-eyebrow">{eyebrow}</Typography><Typography fontSize={12} fontWeight={700} noWrap>{title}</Typography><Typography color="text.secondary" fontSize={10} noWrap>{detail}</Typography></Box></Box>
+  )
+}
+
+function Empty({ title, detail }: { title: string; detail: string }) {
+  return <Box className="surface-empty"><DataObjectIcon color="disabled" sx={{ fontSize: 44 }} /><Typography fontSize={13} fontWeight={650}>{title}</Typography><Typography color="text.secondary" fontSize={11}>{detail}</Typography></Box>
+}
+
+function Guide({ state }: { state: StudioState }) {
+  const text = state.view.surface === "source"
+    ? "Select only the worksheet region that contains row-level data. Charts, pivots, notes, and side calculations outside it are ignored."
+    : state.view.surface === "map"
+      ? "The mapping is the durable contract between source cells and typed database columns. Formula columns remain workbook-owned."
+      : "Relationships belong to the analytical model. They do not change the original row-level table."
+  return <Box className="surface-guide"><Typography fontSize={11}>{text}</Typography></Box>
 }
 
 function Settings({ model, state }: ViewProps) {
@@ -782,7 +954,7 @@ function act(task: Promise<unknown>) {
 }
 
 function show(model: PrepStudio, dataset: string, step?: string) {
-  model.view(step ? { dataset, step } : { dataset })
+  model.view(step ? { dataset, step, surface: "rows" } : { dataset, surface: "rows" })
   act(model.preview({ dataset, limit: 100 }))
 }
 
@@ -870,12 +1042,6 @@ function names(value: string) {
   return value.split(",").map((item) => item.trim()).filter(Boolean)
 }
 
-function index(value: string) {
-  const raw = value.trim()
-  if (!/^[a-z]+$/i.test(raw)) throw new Error(`Invalid Excel column: ${value}`)
-  return [...raw.toUpperCase()].reduce((sum, char) => sum * 26 + char.charCodeAt(0) - 64, 0)
-}
-
 function letters(value: number | undefined) {
   if (!value) return "A"
   const chars: string[] = []
@@ -889,11 +1055,6 @@ function last(columns: readonly number[]) {
   const value = columns.at(-1)
   if (!value) return 1
   return value
-}
-
-function span(left: number | undefined, right: number | undefined) {
-  if (!left || !right || right < left) throw new Error("Source columns must form a non-empty contiguous range")
-  return Array.from({ length: right - left + 1 }, (_, offset) => left + offset)
 }
 
 function value(raw: string | undefined) {

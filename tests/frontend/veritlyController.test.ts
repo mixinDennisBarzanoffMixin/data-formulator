@@ -1,7 +1,8 @@
 import { beforeAll, describe, expect, test, vi } from "vitest"
+import { feeds } from "./setup"
 
 beforeAll(() => {
-  window.history.replaceState({}, "", "/veritly/workspace?frame=dataprep%3Aproject&parentOrigin=http%3A%2F%2Flocalhost")
+  window.history.replaceState({}, "", "/veritly/workspace?frame=dataprep%3Aproject&parentOrigin=http%3A%2F%2Flocalhost&api=http%3A%2F%2Fdata.localhost")
 })
 
 describe("Veritly preparation controller", () => {
@@ -24,42 +25,45 @@ describe("Veritly preparation controller", () => {
   })
 
   test("loads workbook metadata and resets bounds when worksheets change", async () => {
-    const protocol = await import("../../src/veritly/protocol")
     const { PrepStudio } = await import("../../src/veritly/controller")
     const post = vi.spyOn(window, "postMessage").mockImplementation(() => undefined)
-    const model = new PrepStudio()
-    model.mount()
-
-    receive({
-      type: "veritly.iframe.open",
-      frame: "dataprep:project",
-      request: 1,
-      path: "Sales.prep",
-      payload: { recipe: "recipe" },
-    })
-    await answer(post, protocol, "inspect", {
-      id: "recipe",
-      project: "project",
-      path: "Sales.prep",
-      schema: "sales_abcd1234",
-      source: { kind: "workbook", file: "file-1", path: "Sales.xlsx", revision: 4 },
-      version: 1,
-      state: "draft",
-      commands: [],
-      created: 1,
-      updated: 1,
-    })
-    await Promise.all([
-      answer(post, protocol, "project", {
+    const calls: { url: string; init?: RequestInit }[] = []
+    const fetcher = vi.spyOn(window, "fetch").mockImplementation(async (input, init) => {
+      const url = String(input)
+      calls.push({ url, init })
+      if (url.endsWith("/preps/recipe") && !init?.method) return Response.json({
+        id: "recipe",
+        project: "project",
+        path: "Sales.prep",
+        schema: "sales_abcd1234",
+        source: { kind: "workbook", file: "file-1", path: "Sales.xlsx", revision: 4 },
+        version: 1,
+        state: "draft",
+        commands: [],
+        created: 1,
+        updated: 1,
+      })
+      if (url.endsWith("/project")) return Response.json({
         id: "project",
         state: "unprovisioned",
         quota: { used: 0, limit: 10_737_418_240, percent: 0 },
         revision: 0,
         preps: [],
-      }),
-      answer(post, protocol, "datasets", { datasets: [] }),
-      answer(post, protocol, "issues", []),
-      answer(post, protocol, "workbook", {
+      })
+      if (url.endsWith("/datasets")) return Response.json({ datasets: [] })
+      if (url.endsWith("/issues")) return Response.json({ issues: [] })
+      if (url.endsWith("/workbooks")) return Response.json({
+        workbooks: [{ file: "file-1", path: "Sales.xlsx", revision: 4, updated: 1 }],
+      })
+      if (url.endsWith("/mapping")) return Response.json({
+        prep: "recipe",
+        version: 1,
+        state: "draft",
+        source: { kind: "workbook", file: "file-1", path: "Sales.xlsx", revision: 4 },
+        sources: [],
+        targets: [],
+      })
+      if (url.endsWith("/workbook")) return Response.json({
         file: "file-1",
         revision: 4,
         sheets: [
@@ -80,10 +84,53 @@ describe("Veritly preparation controller", () => {
               { header: 2, start: 3, end: 20, left: 9, right: 10 },
             ],
           },
+          {
+            name: "Empty",
+            rows: { start: 1, end: 1 },
+            columns: { start: 1, end: 1 },
+            visibility: "visible",
+            regions: [],
+          },
         ],
-      }),
-    ])
+      })
+      if (url.endsWith("/profile")) return Response.json({
+        dataset: "source-rows",
+        rows: 1,
+        columns: [{
+          column: "Code",
+          type: "text",
+          nulls: 0,
+          distinct: 1,
+          invalid: 0,
+          formulas: 0,
+          stale: 0,
+          expressions: [],
+        }],
+        issues: 0,
+      })
+      if (url.endsWith("/preview")) return Response.json(
+        { code: "identity_invalid", message: "identity_invalid" },
+        { status: 409 },
+      )
+      throw new Error(`Unexpected data request: ${url}`)
+    })
+    const model = new PrepStudio()
+    model.mount()
+
+    receive({
+      type: "veritly.iframe.open",
+      frame: "dataprep:project",
+      request: 1,
+      path: "Sales.prep",
+      payload: { recipe: "recipe", project: "project" },
+    })
     await vi.waitFor(() => expect(model.get().phase).toBe("ready"))
+    const count = calls.filter((call) => call.url.endsWith("/preps/recipe")).length
+    const feed = feeds.at(-1)
+    if (!feed) throw new Error("Controller did not subscribe to project data changes")
+    feed.dispatchEvent(new Event("project"))
+    await vi.waitFor(() => expect(calls.filter((call) => call.url.endsWith("/preps/recipe")).length).toBeGreaterThan(count))
+    await vi.waitFor(() => expect(model.get().busy).toBeUndefined())
 
     expect(model.get().config).toEqual({
       sheet: "Transactions",
@@ -91,6 +138,31 @@ describe("Veritly preparation controller", () => {
       start: 3,
       end: 1_000,
       columns: [2, 3, 4, 5],
+      keys: [],
+    })
+    expect(model.sheet("Empty")).toEqual({
+      sheet: "Empty",
+      header: 1,
+      start: 1,
+      end: 1,
+      columns: [],
+      keys: [],
+    })
+    expect(model.get().gates.prepare.enabled).toBe(false)
+    expect(model.sheet("Transactions")).toEqual({
+      sheet: "Transactions",
+      header: 2,
+      start: 3,
+      end: 1_000,
+      columns: [2, 3, 4, 5],
+      keys: [],
+    })
+    expect(model.region(1)).toEqual({
+      sheet: "Transactions",
+      header: 2,
+      start: 3,
+      end: 20,
+      columns: [9, 10],
       keys: [],
     })
     expect(model.select({ ...model.get().config, sheet: "Archive" })).toEqual({
@@ -111,25 +183,10 @@ describe("Veritly preparation controller", () => {
     })
 
     const task = model.prepare()
-    await answer(post, protocol, "profile", {
-      dataset: "source-rows",
-      rows: 1,
-      columns: [{
-        column: "Code",
-        type: "text",
-        nulls: 0,
-        distinct: 1,
-        invalid: 0,
-        formulas: 0,
-        stale: 0,
-        expressions: [],
-      }],
-      issues: 0,
-    })
-    await vi.waitFor(() => expect(invoke(post, protocol, "preview")).toBeDefined())
-    const preview = invoke(post, protocol, "preview")
-    if (!preview) throw new Error("Controller did not preflight the preparation output")
-    expect(preview.input).toMatchObject({
+    await expect(task).rejects.toThrow("identity_invalid")
+    const preview = calls.find((call) => call.url.endsWith("/preview"))
+    if (!preview?.init?.body) throw new Error("Controller did not preflight the preparation output")
+    expect(JSON.parse(String(preview.init.body))).toMatchObject({
       dataset: "output-command",
       draft: {
         expectedVersion: 1,
@@ -140,13 +197,11 @@ describe("Veritly preparation controller", () => {
         ],
       },
     })
-    expect(invoke(post, protocol, "applyAll")).toBeUndefined()
-    receive({ type: "result", id: preview.id, ok: false, error: "identity_invalid" })
-    await expect(task).rejects.toThrow("identity_invalid")
-    expect(invoke(post, protocol, "applyAll")).toBeUndefined()
+    expect(calls.some((call) => call.url.endsWith("/commands/batch"))).toBe(false)
 
     model.unmount()
     post.mockRestore()
+    fetcher.mockRestore()
   })
 
   test("builds typed transform steps and preserves output ownership", async () => {
@@ -278,28 +333,4 @@ function recipe() {
 
 function receive(data: unknown) {
   window.dispatchEvent(new MessageEvent("message", { data, origin: "http://localhost", source: window }))
-}
-
-async function answer(
-  post: ReturnType<typeof vi.spyOn>,
-  protocol: typeof import("../../src/veritly/protocol"),
-  action: string,
-  value: unknown,
-) {
-  await vi.waitFor(() => expect(invoke(post, protocol, action)).toBeDefined())
-  const message = invoke(post, protocol, action)
-  if (!message) throw new Error(`Controller did not invoke ${action}`)
-  receive({ type: "result", id: message.id, ok: true, value })
-}
-
-function invoke(
-  post: ReturnType<typeof vi.spyOn>,
-  protocol: typeof import("../../src/veritly/protocol"),
-  action: string,
-) {
-  return post.mock.calls.flatMap((call) => {
-    const parsed = protocol.Outgoing.safeParse(call[0])
-    if (!parsed.success || parsed.data.type !== "invoke") return []
-    return [parsed.data]
-  }).find((message) => message.action === action)
 }

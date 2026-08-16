@@ -3,12 +3,15 @@ import type {
   Dataset,
   Issue,
   Job,
+  Mapping,
   Preview,
   Profile,
   Quota,
   Recipe as WireRecipe,
   Row,
   WorkbookCatalog as WireCatalog,
+  WorkbookRegion,
+  Workbook,
 } from "./protocol"
 
 const Id = z.string().trim().min(1).max(256)
@@ -259,6 +262,7 @@ export type PrepConfig = Readonly<Omit<z.infer<typeof Config>, "columns" | "keys
 
 export const View = z.strictObject({
   ribbon: z.enum(["home", "transform", "column", "combine", "view"]),
+  surface: z.enum(["source", "map", "model", "rows", "review"]),
   detail: z.enum(["profile", "issues", "jobs"]),
   step: Id.optional(),
   dataset: Id.optional(),
@@ -358,13 +362,14 @@ export type StudioCatalog = Readonly<Omit<WireCatalog, "sheets"> & {
   }>[]
 }>
 
-export type StudioAction = "open" | "apply" | "prepare" | "profile" | "preview" | "rows" | "insert" | "edit" |
+export type StudioAction = "open" | "apply" | "rebind" | "prepare" | "profile" | "preview" | "rows" | "insert" | "edit" |
   "remove" | "transform" | "publish" | "writeback" | "reconcile" | "resolve" | "cancel" | "export"
 
 export type StudioGate = Readonly<{ enabled: true } | { enabled: false; reason: string }>
 
 export type StudioGates = Readonly<{
   prepare: StudioGate
+  rebind: StudioGate
   profile: StudioGate
   transform: StudioGate
   publish: StudioGate
@@ -380,9 +385,11 @@ export type StudioGates = Readonly<{
 
 export type StudioState = Readonly<{
   phase: "idle" | "loading" | "ready"
-  prep?: Readonly<{ path: string; recipe: string }>
+  prep?: Readonly<{ path: string; recipe: string; project: string }>
   recipe?: PrepRecipe
   catalog?: StudioCatalog
+  workbooks: readonly Workbook[]
+  mapping?: Mapping
   config: PrepConfig
   view: StudioView
   draft?: StudioDraft
@@ -459,9 +466,20 @@ export function bounds(value: StudioCatalog, name?: string): PrepConfig {
     : value.sheets.find((item) => item.visibility === "visible" && item.regions.length > 0)
   if (!sheet) throw new Error(name ? `Workbook worksheet is unavailable: ${name}` : "Workbook has no visible table-like data region")
   const region = sheet.regions[0]
-  if (!region) throw new Error(`Workbook worksheet has no recommended table-like data region: ${sheet.name}`)
-  return Object.freeze({
+  if (!region) return Object.freeze({
     sheet: sheet.name,
+    header: sheet.rows.start,
+    start: sheet.rows.start,
+    end: sheet.rows.end,
+    columns: Object.freeze([]),
+    keys: Object.freeze([]),
+  })
+  return regionBounds(sheet.name, region)
+}
+
+export function regionBounds(name: string, region: WorkbookRegion): PrepConfig {
+  return Object.freeze({
+    sheet: name,
     header: region.header,
     start: region.start,
     end: region.end,
@@ -474,11 +492,12 @@ export function bounds(value: StudioCatalog, name?: string): PrepConfig {
 }
 
 export function nav(value?: PrepRecipe): StudioView {
-  if (!value) return Object.freeze({ ribbon: "home", detail: "profile" })
+  if (!value) return Object.freeze({ ribbon: "home", surface: "source", detail: "profile" })
   const step = value.commands.at(-1)
   const output = [...value.commands].reverse().find((item) => item.kind === "output")
   return Object.freeze({
     ribbon: "home",
+    surface: output ? "rows" : "source",
     detail: "profile",
     ...(step ? { step: step.id } : {}),
     ...(output && output.kind === "output" ? { dataset: output.input } : {}),
@@ -591,6 +610,7 @@ export function gates(value: Omit<StudioState, "gates">): StudioGates {
   const active = value.job && (value.job.state === "queued" || value.job.state === "running")
   return Object.freeze({
     prepare: value.busy ? idle : !prep ? block("Preparation is not loaded") : !workbook ? block("Native data has no workbook range") : !ready ? block("Preparation is not writable") : !selected ? block("Select a worksheet and bounded range") : allow(),
+    rebind: value.busy ? idle : !prep ? block("Preparation is not loaded") : !workbook ? block("Native data has no workbook binding") : prep.state !== "draft" && prep.state !== "source_missing" ? block("Published data requires a new preparation before changing its workbook") : allow(),
     profile: value.busy ? idle : !profiled ? block("Select a recipe query to profile") : allow(),
     transform: value.busy ? idle : !prep ? block("Preparation is not loaded") : !target ? block("Preparation has no output") : !transformable ? block("Load the final query preview before adding a step") : allow(),
     publish: value.busy ? idle : !prep ? block("Preparation is not loaded") : !ready ? block("Preparation is not writable") : !target ? block("Preparation has no output") : allow(),
