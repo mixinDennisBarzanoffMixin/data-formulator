@@ -328,7 +328,7 @@ def runs(columns: list[int]) -> list[tuple[int, int]]:
 
 
 def text(value: object) -> str | None:
-    if value is None:
+    if value is None or value == "":
         return None
     if isinstance(value, (datetime, date, time)):
         return value.isoformat()
@@ -603,7 +603,7 @@ def locate():
         try:
             yield json.dumps({"$veritly": {"columns": fields}}, separators=(",", ":")) + "\n"
             for number, row in enumerate(tab.iter_rows(min_row=start, max_row=end, values_only=True), start=start):
-                values = [row[column - 1] if column <= len(row) else None for column in selected]
+                values = [text(row[column - 1] if column <= len(row) else None) for column in selected]
                 if not any(item is not None for item in values):
                     continue
                 yield json.dumps({

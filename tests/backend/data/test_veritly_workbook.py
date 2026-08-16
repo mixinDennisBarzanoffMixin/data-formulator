@@ -1,7 +1,10 @@
 import io
+import json
 import re
 import zipfile
+from uuid import UUID
 
+import pyarrow.parquet as pq
 from openpyxl import Workbook
 from openpyxl.styles import PatternFill
 
@@ -61,6 +64,32 @@ def empty() -> bytes:
             if item.filename == "xl/worksheets/sheet1.xml":
                 content, count = re.subn(br"<dimension[^>]*/>", b"", content, count=1)
                 assert count == 1
+            target.writestr(item, content)
+    return output.getvalue()
+
+
+def styled_blanks() -> bytes:
+    book = Workbook()
+    sheet = book.active
+    sheet.title = "Rows"
+    sheet.append(["Customer", "Veritly ID", "Side"])
+    sheet.append(["Ada", "", None])
+    sheet.append(["", "", "unrelated"])
+    sheet.append(["Grace", "", None])
+    sheet.append([" ", "", None])
+    for cell in [sheet["A3"], sheet["B3"]]:
+        cell.fill = PatternFill(fill_type="solid", fgColor="FFFF00")
+    data = io.BytesIO()
+    book.save(data)
+    output = io.BytesIO()
+    with zipfile.ZipFile(io.BytesIO(data.getvalue())) as source, zipfile.ZipFile(output, "w") as target:
+        for item in source.infolist():
+            content = source.read(item)
+            if item.filename == "xl/worksheets/sheet1.xml":
+                for cell in [b"A3", b"B3"]:
+                    pattern = rb'(<c r="' + cell + rb'"[^>]*)\s*/>'
+                    content, count = re.subn(pattern, rb"\g<1>><is><t></t></is></c>", content, count=1)
+                    assert count == 1
             target.writestr(item, content)
     return output.getvalue()
 
@@ -153,6 +182,84 @@ def test_workbook_catalog_requires_service_authentication(monkeypatch):
         content_type="multipart/form-data",
     )
     assert response.status_code == 401
+
+
+def test_normalize_and_locate_omit_explicit_empty_selected_rows(monkeypatch):
+    monkeypatch.setenv("DATA_WORKER_TOKEN", "secret")
+    client = app.test_client()
+    data = styled_blanks()
+    selection = json.dumps({"sheet": "Rows", "header": 1, "start": 2, "end": 5, "left": 1, "right": 2})
+    headers = {"x-veritly-service-token": "secret"}
+
+    normalized = client.post(
+        "/normalize",
+        data={"selection": selection, "file": (io.BytesIO(data), "rows.xlsx")},
+        headers=headers,
+        content_type="multipart/form-data",
+    )
+    assert normalized.status_code == 200
+    rows = pq.read_table(io.BytesIO(normalized.data)).to_pylist()
+    assert rows == [
+        {"Customer": "Ada", "Veritly ID": None},
+        {"Customer": "Grace", "Veritly ID": None},
+        {"Customer": " ", "Veritly ID": None},
+    ]
+
+    located = client.post(
+        "/locate",
+        data={
+            "selection": selection,
+            "identity": "Veritly ID",
+            "file": (io.BytesIO(data), "rows.xlsx"),
+        },
+        headers=headers,
+        content_type="multipart/form-data",
+    )
+    assert located.status_code == 200
+    assert [json.loads(line) for line in located.get_data(as_text=True).splitlines()] == [
+        {"$veritly": {"columns": ["Customer", "Veritly ID"]}},
+        {"row": 1, "id": None},
+        {"row": 3, "id": None},
+        {"row": 4, "id": None},
+    ]
+
+    commands = [
+        {"id": "source", "after": [], "kind": "source", "output": "raw"},
+        {
+            "id": "key",
+            "after": ["source"],
+            "kind": "key",
+            "input": "raw",
+            "output": "keyed",
+            "key": {"strategy": "generated", "name": "Veritly ID"},
+        },
+        {
+            "id": "final",
+            "after": ["key"],
+            "kind": "output",
+            "input": "keyed",
+            "schema": "rows_12345678",
+            "table": "rows",
+            "class": "entity",
+            "keys": ["Veritly ID"],
+            "owners": {"Veritly ID": "workbook"},
+        },
+    ]
+    executed = client.post(
+        "/execute",
+        data={
+            "recipe": json.dumps({"inputs": ["raw"], "commands": commands, "output": "final"}),
+            "file": (io.BytesIO(normalized.data), "raw.parquet"),
+        },
+        headers={**headers, "accept": "application/x-ndjson"},
+        content_type="multipart/form-data",
+    )
+    assert executed.status_code == 200
+    output = [json.loads(line) for line in executed.get_data(as_text=True).splitlines()][1:]
+    ids = [UUID(row["Veritly ID"]) for row in output]
+    assert len(ids) == 3
+    assert len(set(ids)) == 3
+    assert [row["Customer"] for row in output] == ["Ada", "Grace", " "]
 
 
 def test_workbook_catalog_audits_archive_paths_before_opening(monkeypatch):

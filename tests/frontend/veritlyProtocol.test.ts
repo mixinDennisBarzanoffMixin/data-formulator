@@ -82,6 +82,34 @@ describe("Veritly preparation protocol", () => {
     expect(fetcher.mock.calls[0]?.[1]).toMatchObject({ credentials: "include" })
   })
 
+  test.each(["replace", "append", "upsert"] as const)("publishes %s through the typed data client", async (mode) => {
+    const protocol = await import("../../src/veritly/protocol")
+    const fetcher = vi.spyOn(window, "fetch").mockResolvedValue(Response.json({
+      id: "job",
+      kind: "publish",
+      state: "queued",
+      progress: 0,
+      created: 1,
+      updated: 1,
+    }))
+    const bridge = new protocol.Bridge(() => ({ path: "Sales.prep", project: "project", recipe: "recipe" }))
+
+    await expect(bridge.invoke("publish", {
+      expectedVersion: 7,
+      mode,
+      dataset: "entity-rows",
+    }, protocol.Job)).resolves.toMatchObject({ kind: "publish", state: "queued" })
+
+    expect(fetcher.mock.calls[0]?.[0]).toBe("http://data.localhost/project/project/api/data/preps/recipe/publish")
+    expect(fetcher.mock.calls[0]?.[1]).toMatchObject({ method: "POST", credentials: "include" })
+    expect(JSON.parse(String(fetcher.mock.calls[0]?.[1]?.body))).toEqual({
+      expectedVersion: 7,
+      mode,
+      dataset: "entity-rows",
+      overwrite: false,
+    })
+  })
+
   test("throws unsupported operations without a parent relay", async () => {
     const protocol = await import("../../src/veritly/protocol")
     const bridge = new protocol.Bridge(() => ({ path: "Sales.prep", project: "project", recipe: "recipe" }))
