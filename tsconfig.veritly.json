@@ -1,0 +1,14 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "allowJs": false,
+    "noEmit": true
+  },
+  "include": [
+    "src/veritly/protocol.ts",
+    "src/veritly/model.ts",
+    "src/veritly/controller.ts",
+    "src/veritly/studio.tsx",
+    "src/veritly/index.tsx"
+  ]
+}

@@ -44,6 +44,23 @@ describe("Veritly preparation protocol", () => {
     }).success).toBe(true)
   })
 
+  test("requires ranked typed workbook regions independently from styled bounds", async () => {
+    const protocol = await import("../../src/veritly/protocol")
+    const sheet = {
+      name: "Rows",
+      rows: { start: 1, end: 1_048_576 },
+      columns: { start: 1, end: 16_384 },
+      visibility: "visible" as const,
+      regions: [{ header: 2, start: 3, end: 100, left: 2, right: 5 }],
+    }
+    expect(protocol.WorkbookSheet.parse(sheet).regions[0]).toEqual(sheet.regions[0])
+    expect(() => protocol.WorkbookSheet.parse({ ...sheet, regions: undefined })).toThrow()
+    expect(() => protocol.WorkbookSheet.parse({
+      ...sheet,
+      regions: [{ header: 3, start: 3, end: 100, left: 2, right: 5 }],
+    })).toThrow("Recommended data rows must start after the header")
+  })
+
   test("owns pending calls and validates results", async () => {
     const protocol = await import("../../src/veritly/protocol")
     const post = vi.spyOn(window, "postMessage").mockImplementation(() => undefined)

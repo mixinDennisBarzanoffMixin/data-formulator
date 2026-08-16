@@ -229,9 +229,12 @@ class Executor:
             keys = strings(key.get("columns"), "key columns")
             require_columns(user, keys)
             group = ", ".join(quote(name) for name in keys)
+            checks = " or ".join(
+                f"{quote(name)} is null or trim(cast({quote(name)} as varchar)) = ''"
+                for name in keys
+            )
             invalid = self.db.execute(
-                f"select count(*) from {rel} where "
-                f"({' or '.join(f'{quote(name)} is null or trim(cast({quote(name)} as varchar)) = \'\'' for name in keys)})"
+                f"select count(*) from {rel} where ({checks})"
             ).fetchone()[0]
             duplicates = self.db.execute(
                 f"select coalesce(sum(n - 1), 0) from (select count(*) n from {rel} group by {group})"

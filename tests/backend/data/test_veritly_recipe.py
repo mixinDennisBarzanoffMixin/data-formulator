@@ -103,6 +103,18 @@ def test_cellwise_recipe_preserves_rows_ids_types_and_formula_lineage(tmp_path: 
     assert b"veritly.recipe" in pq.read_metadata(one.path).metadata
 
 
+def test_existing_key_rejects_blank_values(tmp_path: Path):
+    raw = parquet(tmp_path / "raw.parquet", [{"Customer ID": ""}])
+    commands = [
+        source("source", "raw"),
+        flow("key", "key", "raw", "keyed", ["source"], key={"strategy": "existing", "columns": ["Customer ID"]}),
+        output("final", "keyed", ["key"]),
+    ]
+    with pytest.raises(RecipeError, match="unique and non-null") as error:
+        run(tmp_path / "blank-key", {"raw": raw}, commands, "final")
+    assert error.value.code == "identity_invalid"
+
+
 def test_explicit_row_changes_and_derived_columns_are_visible_and_not_writeback(tmp_path: Path):
     raw = parquet(tmp_path / "raw.parquet", [
         {"Name": "A-One", "Amount": 1},

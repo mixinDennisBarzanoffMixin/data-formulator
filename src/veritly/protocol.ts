@@ -134,6 +134,43 @@ export const Source = z.discriminatedUnion("kind", [
   z.object({ kind: z.literal("native") }),
 ])
 
+const WorkbookRows = z.strictObject({
+  start: z.number().int().positive().max(1_048_576),
+  end: z.number().int().positive().max(1_048_576),
+}).refine((value) => value.end >= value.start, { message: "Worksheet row end must not precede its start" })
+
+const WorkbookColumns = z.strictObject({
+  start: z.number().int().positive().max(16_384),
+  end: z.number().int().positive().max(16_384),
+}).refine((value) => value.end >= value.start, { message: "Worksheet column end must not precede its start" })
+
+export const WorkbookRegion = z.strictObject({
+  header: z.number().int().positive().max(1_048_575),
+  start: z.number().int().positive().max(1_048_576),
+  end: z.number().int().positive().max(1_048_576),
+  left: z.number().int().positive().max(16_384),
+  right: z.number().int().positive().max(16_384),
+}).refine((value) => value.start > value.header, { message: "Recommended data rows must start after the header" })
+  .refine((value) => value.end >= value.start, { message: "Recommended row end must not precede its start" })
+  .refine((value) => value.right >= value.left, { message: "Recommended column end must not precede its start" })
+export type WorkbookRegion = z.infer<typeof WorkbookRegion>
+
+export const WorkbookSheet = z.strictObject({
+  name: z.string().trim().min(1).max(31),
+  rows: WorkbookRows,
+  columns: WorkbookColumns,
+  visibility: z.enum(["visible", "hidden", "veryHidden"]),
+  regions: z.array(WorkbookRegion).max(32),
+})
+export type WorkbookSheet = z.infer<typeof WorkbookSheet>
+
+export const WorkbookCatalog = z.strictObject({
+  file: Id,
+  revision: z.number().int().positive(),
+  sheets: z.array(WorkbookSheet).min(1).max(1_024),
+})
+export type WorkbookCatalog = z.infer<typeof WorkbookCatalog>
+
 export const Recipe = z.object({
   id: Id,
   project: Id,
@@ -145,6 +182,21 @@ export const Recipe = z.object({
   commands: z.array(z.object({
     id: Id,
     kind: Id,
+    input: Id.optional(),
+    output: Id.optional(),
+    sheet: z.string().trim().min(1).max(128).optional(),
+    range: z.object({
+      header: z.number().int().positive(),
+      start: z.number().int().positive(),
+      end: z.number().int().positive(),
+      left: z.number().int().positive(),
+      right: z.number().int().positive(),
+    }).optional(),
+    key: z.discriminatedUnion("strategy", [
+      z.object({ strategy: z.literal("existing"), columns: z.array(z.string().trim().min(1).max(128)).min(1) }),
+      z.object({ strategy: z.literal("generated"), name: z.string().trim().min(1).max(128) }),
+    ]).optional(),
+    schema: z.string().trim().min(1).max(128).optional(),
     table: z.string().trim().min(1).max(128).optional(),
     class: Class.optional(),
   }).passthrough()),
@@ -160,15 +212,42 @@ export const Profile = z.object({
   columns: z.array(z.object({
     column: z.string().trim().min(1).max(128),
     type: z.string().min(1),
-  }).passthrough()),
+    nulls: z.number().int().nonnegative(),
+    distinct: z.number().int().nonnegative(),
+    invalid: z.number().int().nonnegative(),
+    formulas: z.number().int().nonnegative(),
+    stale: z.number().int().nonnegative(),
+    expressions: z.array(z.string().min(1)).max(20),
+    min: Value.optional(),
+    max: Value.optional(),
+  })),
   issues: z.number().int().nonnegative(),
 })
 export type Profile = z.infer<typeof Profile>
 
 export const Issue = z.object({
   id: Id,
+  prep: Id,
+  run: Id.optional(),
+  code: z.enum([
+    "version_conflict",
+    "source_revision_changed",
+    "dataset_revision_changed",
+    "sync_conflict",
+    "identity_invalid",
+    "mapping_not_invertible",
+    "formula_stale",
+    "quota_exceeded",
+    "repairing",
+    "job_failed",
+  ]),
+  severity: z.enum(["warning", "error"]),
+  row: z.string().min(1).optional(),
+  column: z.string().trim().min(1).max(128).optional(),
+  message: z.string().min(1),
   state: z.enum(["open", "resolved"]),
-}).passthrough()
+  version: z.number().int().nonnegative(),
+})
 export type Issue = z.infer<typeof Issue>
 export const Issues = z.array(Issue)
 
@@ -209,7 +288,23 @@ export const Quota = z.object({
   percent: z.number().nonnegative(),
 })
 export type Quota = z.infer<typeof Quota>
-export const Project = z.object({ quota: Quota }).passthrough()
+const Summary = Recipe.pick({
+  id: true,
+  path: true,
+  schema: true,
+  source: true,
+  state: true,
+  version: true,
+  updated: true,
+})
+export const Project = z.strictObject({
+  id: Id,
+  state: z.enum(["unprovisioned", "provisioning", "ready", "repairing", "deleting"]),
+  source: z.strictObject({ path: Path, database: z.number().int().positive() }).optional(),
+  quota: Quota,
+  revision: z.number().int().nonnegative(),
+  preps: z.array(Summary),
+})
 
 export const Receipt = z.object({
   id: Id,

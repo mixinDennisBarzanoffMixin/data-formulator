@@ -9,6 +9,7 @@ import os
 import shutil
 import tempfile
 import zipfile
+import xml.etree.ElementTree as etree
 from datetime import date, datetime, time
 from decimal import Decimal
 from pathlib import Path, PurePosixPath
@@ -20,7 +21,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 from flask import Flask, Response, after_this_request, jsonify, request, send_file, stream_with_context
 from openpyxl import load_workbook
-from openpyxl.utils.cell import column_index_from_string
+from openpyxl.utils.cell import column_index_from_string, range_boundaries
 from data_formulator.veritly_recipe import RecipeError, execute as execute_recipe, rewrite_metadata
 
 
@@ -28,6 +29,10 @@ MAX_BYTES = 100 * 1024 * 1024
 MAX_EXPANDED = 2 * 1024 * 1024 * 1024
 MAX_RATIO = 200
 MAX_CELLS = 20_000_000
+MAX_ROWS = 1_048_576
+MAX_COLUMNS = 16_384
+MAX_SHEETS = 1_024
+MAX_REGIONS = 32
 BATCH = 10_000
 
 app = Flask(__name__)
@@ -62,7 +67,11 @@ def upload() -> Path:
     if path.stat().st_size > MAX_BYTES:
         path.unlink(missing_ok=True)
         raise ValueError("XLSX exceeds 100 MiB")
-    audit(path)
+    try:
+        audit(path)
+    except Exception:
+        path.unlink(missing_ok=True)
+        raise
     return path
 
 
@@ -146,6 +155,157 @@ def index(value: object) -> int:
     if isinstance(value, str) and value.isalpha():
         return column_index_from_string(value.upper())
     raise ValueError("Columns must be positive indexes or Excel letters")
+
+
+def catalog(path: Path) -> dict[str, object]:
+    book = load_workbook(path, read_only=True, data_only=False, keep_links=False)
+    archive = zipfile.ZipFile(path)
+    try:
+        if len(book.worksheets) > MAX_SHEETS:
+            raise ValueError("XLSX exceeds the worksheet limit")
+        sheets = []
+        for sheet in book.worksheets:
+            left, start, right, end = range_boundaries(sheet.calculate_dimension())
+            if not all(isinstance(item, int) for item in [left, start, right, end]):
+                raise ValueError("Worksheet has no bounded used range")
+            if start < 1 or end > MAX_ROWS or end < start:
+                raise ValueError("Worksheet used rows exceed Excel bounds")
+            if left < 1 or right > MAX_COLUMNS or right < left:
+                raise ValueError("Worksheet used columns exceed Excel bounds")
+            if sheet.sheet_state not in {"visible", "hidden", "veryHidden"}:
+                raise ValueError("Worksheet visibility is invalid")
+            sheets.append({
+                "name": sheet.title,
+                "rows": {"start": start, "end": end},
+                "columns": {"start": left, "end": right},
+                "visibility": sheet.sheet_state,
+                "regions": regions(archive, sheet),
+            })
+        return {"sheets": sheets}
+    finally:
+        archive.close()
+        book.close()
+
+
+def regions(archive: zipfile.ZipFile, sheet) -> list[dict[str, int]]:
+    source = getattr(sheet, "_worksheet_path", None)
+    if not isinstance(source, str) or not source:
+        raise ValueError("Worksheet XML path is unavailable")
+    active: list[dict[str, int]] = []
+    found: list[dict[str, int]] = []
+    with archive.open(source) as body:
+        for _, element in etree.iterparse(body, events=("end",)):
+            if element.tag.rsplit("}", 1)[-1] != "row":
+                continue
+            number = row_number(element)
+            columns = row_columns(element)
+            next_active: list[dict[str, int]] = []
+            for item in active:
+                hits = sum(item["left"] <= column <= item["right"] for column in columns)
+                if hits:
+                    item["end"] = number
+                    item["rows"] += 1
+                    item["cells"] += hits
+                    next_active.append(item)
+                    continue
+                if number - item["end"] <= 2:
+                    next_active.append(item)
+                    continue
+                found.append(item)
+            spans = runs(columns)
+            spans = [span for span in spans if not any(
+                item["left"] == span[0] and item["right"] == span[1] and item["end"] == number
+                for item in next_active
+            )]
+            next_active.extend({
+                "header": number,
+                "start": number + 1,
+                "end": number,
+                "left": left,
+                "right": right,
+                "rows": 1,
+                "cells": right - left + 1,
+            } for left, right in spans if number < MAX_ROWS)
+            active = next_active
+            element.clear()
+    found.extend(active)
+    candidates = [item for item in found if item["rows"] > 1 and item["end"] >= item["start"]]
+    candidates.sort(key=lambda item: (
+        -(item["rows"] - 1),
+        -item["cells"],
+        -(item["right"] - item["left"] + 1),
+        item["header"],
+        item["left"],
+    ))
+    selected: list[dict[str, int]] = []
+    for item in candidates:
+        region = {name: item[name] for name in ["header", "start", "end", "left", "right"]}
+        if region in selected:
+            continue
+        if any(
+            region["header"] >= current["header"]
+            and region["end"] <= current["end"]
+            and region["left"] >= current["left"]
+            and region["right"] <= current["right"]
+            for current in selected
+        ):
+            continue
+        selected.append(region)
+        if len(selected) == MAX_REGIONS:
+            break
+    return selected
+
+
+def row_number(row) -> int:
+    raw = row.attrib.get("r")
+    if not isinstance(raw, str) or not raw.isdigit():
+        raise ValueError("Worksheet row number is invalid")
+    number = int(raw)
+    if number < 1 or number > MAX_ROWS:
+        raise ValueError("Worksheet row exceeds Excel bounds")
+    return number
+
+
+def row_columns(row) -> list[int]:
+    columns = []
+    for cell in row:
+        if cell.tag.rsplit("}", 1)[-1] != "c" or not populated(cell):
+            continue
+        raw = cell.attrib.get("r")
+        if not isinstance(raw, str):
+            raise ValueError("Worksheet cell reference is invalid")
+        letters = raw.rstrip("0123456789")
+        column = column_index_from_string(letters)
+        if column < 1 or column > MAX_COLUMNS:
+            raise ValueError("Worksheet column exceeds Excel bounds")
+        columns.append(column)
+    return sorted(set(columns))
+
+
+def populated(cell) -> bool:
+    return any(
+        child.tag.rsplit("}", 1)[-1] == "f"
+        or child.tag.rsplit("}", 1)[-1] in {"v", "t"} and child.text not in {None, ""}
+        for child in cell.iter()
+        if child is not cell
+    )
+
+
+def runs(columns: list[int]) -> list[tuple[int, int]]:
+    if not columns:
+        return []
+    output: list[tuple[int, int]] = []
+    start = columns[0]
+    end = start
+    for column in columns[1:]:
+        if column == end + 1:
+            end = column
+            continue
+        output.append((start, end))
+        start = column
+        end = column
+    output.append((start, end))
+    return output
 
 
 def text(value: object) -> str | None:
@@ -355,6 +515,17 @@ def profile():
         source.unlink(missing_ok=True)
         if target:
             target.unlink(missing_ok=True)
+
+
+@app.post("/workbook")
+def workbook():
+    if not authorized():
+        return jsonify({"error": "unauthorized"}), 401
+    source = upload()
+    try:
+        return jsonify(catalog(source))
+    finally:
+        source.unlink(missing_ok=True)
 
 
 @app.post("/preview")
