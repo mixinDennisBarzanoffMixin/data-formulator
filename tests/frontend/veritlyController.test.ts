@@ -128,7 +128,7 @@ describe("Veritly preparation controller", () => {
     const count = calls.filter((call) => call.url.endsWith("/preps/recipe")).length
     const feed = feeds.at(-1)
     if (!feed) throw new Error("Controller did not subscribe to project data changes")
-    feed.dispatchEvent(new Event("project"))
+    feed.dispatchEvent(new Event("row"))
     await vi.waitFor(() => expect(calls.filter((call) => call.url.endsWith("/preps/recipe")).length).toBeGreaterThan(count))
     await vi.waitFor(() => expect(model.get().busy).toBeUndefined())
 

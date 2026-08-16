@@ -744,6 +744,7 @@ export class PrepStudio {
     source.addEventListener("project", this.#changed)
     source.addEventListener("job", this.#changed)
     source.addEventListener("issue", this.#changed)
+    source.addEventListener("row", this.#changed)
     this.#events = source
   }
 
