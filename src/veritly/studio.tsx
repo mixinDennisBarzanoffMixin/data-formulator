@@ -20,46 +20,32 @@ import {
 } from "@mui/material"
 import { DataGrid, GridActionsCellItem, type GridColDef, type GridValidRowModel } from "@mui/x-data-grid"
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react"
-import { frame, parent, type Incoming, type Preview, ready, send } from "./protocol"
+import { z } from "zod"
+import {
+  Bridge,
+  Datasets,
+  Issues,
+  Job,
+  Preview,
+  Profile,
+  Project,
+  Quota,
+  Receipt,
+  Recipe,
+  Row,
+  Rows,
+  frame,
+  parent,
+  parse,
+  ready,
+  send,
+  type Preview as PreviewType,
+  type Quota as QuotaType,
+  type Recipe as RecipeType,
+  type Row as RowType,
+} from "./protocol"
 
 type Prep = { path: string; recipe: string }
-type Source =
-  | { kind: "workbook"; file: string; path: string; revision: number }
-  | { kind: "native" }
-type Recipe = {
-  id: string
-  path: string
-  schema: string
-  source: Source
-  version: number
-  state: "draft" | "ready" | "published" | "source_missing" | "repairing"
-  commands: Array<{
-    id: string
-    kind: string
-    table?: string
-    class?: "entity" | "derived" | "native"
-  }>
-}
-type Profile = {
-  dataset: string
-  rows: number
-  columns: Array<{ column: string; type: string }>
-  issues: number
-}
-type Issue = { id: string; state: "open" | "resolved" }
-type Row = { id: string; version: number; values: Record<string, unknown> }
-type Dataset = {
-  id: string
-  prep?: string
-  table: string
-  class: "entity" | "derived" | "native"
-  columns: Preview["columns"]
-  rows: number
-}
-type Rows = { rows: Row[]; cursor?: string }
-type Job = { id: string; state: "queued" | "running" | "succeeded" | "failed" | "cancelled"; error?: string }
-type Quota = { used: number; limit: number; percent: number }
-type Pending = { resolve(value: unknown): void; reject(error: Error): void }
 
 const theme = createTheme({
   palette: { primary: { main: "#6750a4" }, background: { default: "#f7f7fb" } },
@@ -69,44 +55,39 @@ const theme = createTheme({
 
 export function App() {
   const [prep, setPrep] = useState<Prep>()
-  const [recipe, setRecipe] = useState<Recipe>()
+  const [recipe, setRecipe] = useState<RecipeType>()
   const [sheet, setSheet] = useState("")
   const [header, setHeader] = useState(1)
   const [start, setStart] = useState(2)
   const [end, setEnd] = useState(1000)
   const [columns, setColumns] = useState("")
   const [key, setKey] = useState("")
-  const [preview, setPreview] = useState<Preview>()
+  const [preview, setPreview] = useState<PreviewType>()
   const [paging, setPaging] = useState({ page: 0, pageSize: 100 })
   const [cursors, setCursors] = useState<Record<number, string | undefined>>({ 0: undefined })
   const [draft, setDraft] = useState<Record<string, string>>()
   const [issues, setIssues] = useState<string[]>([])
-  const [quota, setQuota] = useState<Quota>()
+  const [quota, setQuota] = useState<QuotaType>()
   const [busy, setBusy] = useState<string>()
   const [error, setError] = useState<string>()
-  const pending = useRef(new Map<string, Pending>())
   const active = useRef<string>()
+  const bridge = useMemo(() => new Bridge(() => active.current), [])
 
-  const invoke = useCallback((action: string, input?: unknown) => {
-    const path = active.current
-    if (!path) return Promise.reject(new Error("Data preparation is not open"))
-    const id = crypto.randomUUID()
-    send({ type: "invoke", id, path, action, input })
-    return new Promise<unknown>((resolve, reject) => pending.current.set(id, { resolve, reject }))
-  }, [])
+  const invoke = useCallback(<T,>(action: string, input: unknown, schema: z.ZodType<T>) =>
+    bridge.invoke(action, input, schema), [bridge])
 
-  const database = useCallback(async (next: Recipe) => {
+  const database = useCallback(async (next: RecipeType) => {
     if (next.state !== "published") return
     const path = active.current
     if (!path) throw new Error("Data preparation is not open")
     const target = output(next)
-    const list = (await invoke("datasets")) as { datasets: Dataset[] }
+    const list = await invoke("datasets", undefined, Datasets)
     if (active.current !== path) return
     const dataset = list.datasets.find(
       (item) => item.prep === next.id && item.table === target.table && item.class === target.class,
     )
     if (!dataset) throw new Error(`Published dataset is unavailable: ${target.table}`)
-    const page = (await invoke("rows", { dataset: dataset.id, input: { limit: 100 } })) as Rows
+    const page = await invoke("rows", { dataset: dataset.id, input: { limit: 100 } }, Rows)
     if (active.current !== path) return
     setPaging({ page: 0, pageSize: 100 })
     setCursors({ 0: undefined, 1: page.cursor })
@@ -120,23 +101,18 @@ export function App() {
   }, [invoke])
 
   useEffect(() => {
-    const receive = (event: MessageEvent<Incoming>) => {
+    const receive = (event: MessageEvent<unknown>) => {
       if (event.origin !== parent || event.source !== window.parent) return
-      if (!event.data || typeof event.data !== "object") return
-      if (event.data.type === "result") {
-        const call = pending.current.get(event.data.id)
-        if (!call) return
-        pending.current.delete(event.data.id)
-        if (event.data.ok) {
-          call.resolve(event.data.value)
-          return
-        }
-        call.reject(new Error(event.data.error))
+      const parsed = parse(event.data)
+      if (!parsed.success) return
+      if (parsed.data.type === "result") {
+        bridge.settle(parsed.data)
         return
       }
-      if (event.data.frame !== frame) return
-      if (event.data.type === "veritly.iframe.open") {
-        const path = event.data.path
+      if (parsed.data.frame !== frame) return
+      if (parsed.data.type === "veritly.iframe.open") {
+        const path = parsed.data.path
+        bridge.reset()
         active.current = path
         setRecipe(undefined)
         setPreview(undefined)
@@ -153,38 +129,40 @@ export function App() {
         setKey("")
         setPaging({ page: 0, pageSize: 100 })
         setCursors({ 0: undefined })
-        setPrep({ path: event.data.path, recipe: event.data.payload.recipe })
-        send({ type: "veritly.iframe.loaded", frame, request: event.data.request, path: event.data.path })
-        void Promise.all([invoke("inspect"), invoke("project")]).then(async ([value, project]) => {
+        setPrep({ path: parsed.data.path, recipe: parsed.data.payload.recipe })
+        send({ type: "veritly.iframe.loaded", frame, request: parsed.data.request, path: parsed.data.path })
+        void Promise.all([
+          invoke("inspect", undefined, Recipe),
+          invoke("project", undefined, Project),
+        ]).then(async ([next, project]) => {
             if (active.current !== path) return
-            const next = value as Recipe
             setRecipe(next)
-            setQuota((project as { quota: Quota }).quota)
+            setQuota(project.quota)
             await database(next)
-          }).catch((cause: Error) => {
-            if (active.current === path) setError(cause.message)
+          }).catch((cause: unknown) => {
+            if (active.current === path) setError(message(cause))
           })
         return
       }
-      if (event.data.type === "veritly.iframe.flush") {
-        send({ type: "veritly.iframe.flushed", frame, request: event.data.request, path: event.data.path })
+      if (parsed.data.type === "veritly.iframe.flush") {
+        send({ type: "veritly.iframe.flushed", frame, request: parsed.data.request, path: parsed.data.path })
         return
       }
-      if (event.data.method === "state") {
+      if (parsed.data.method === "state") {
         send({
           type: "veritly.iframe.result",
           frame,
-          request: event.data.request,
-          path: event.data.path,
-          value: { path: event.data.path },
+          request: parsed.data.request,
+          path: parsed.data.path,
+          value: { path: parsed.data.path },
         })
         return
       }
       send({
         type: "veritly.iframe.error",
         frame,
-        request: event.data.request,
-        error: `Unsupported data preparation method: ${event.data.method}`,
+        request: parsed.data.request,
+        error: `Unsupported data preparation method: ${parsed.data.method}`,
       })
     }
     window.addEventListener("message", receive)
@@ -193,12 +171,12 @@ export function App() {
   }, [database, invoke])
 
   const run = useCallback(
-    async (name: string, input?: unknown) => {
+    async <T,>(name: string, input: unknown, schema: z.ZodType<T>) => {
       const path = active.current
       if (!path) throw new Error("Data preparation is not open")
       setBusy(name)
       setError(undefined)
-      return invoke(name, input).finally(() => {
+      return invoke(name, input, schema).finally(() => {
         if (active.current === path) setBusy(undefined)
       })
     },
@@ -227,8 +205,8 @@ export function App() {
     if (!bounds.left || !bounds.right) throw new Error("At least one bounded Excel column is required")
 
     const apply = async (command: unknown) => {
-      await run("apply", { expectedVersion: current.version, command })
-      current = (await invoke("inspect")) as Recipe
+      await run("apply", { expectedVersion: current.version, command }, Receipt)
+      current = await invoke("inspect", undefined, Recipe)
       setRecipe(current)
     }
     let current = recipe
@@ -244,9 +222,9 @@ export function App() {
       range: bounds,
     })
 
-    const profile = (await run("profile", { dataset: "source-rows" })) as Profile
+    const profile = await run("profile", { dataset: "source-rows" }, Profile)
     const names = profile.columns.map((item) => item.column)
-    const identity = key.trim() || "Veritly ID"
+    const identity = key.trim() ? key.trim() : "Veritly ID"
     if (key.trim() && !names.includes(identity)) throw new Error(`Business key column does not exist: ${identity}`)
     await apply({
       kind: "key",
@@ -273,26 +251,30 @@ export function App() {
       ]),
     })
 
-    const value = (await run("preview", { dataset: "entity-rows", limit: 100 })) as Preview
+    const value = await run("preview", { dataset: "entity-rows", limit: 100 }, Preview)
     setPaging({ page: 0, pageSize: 100 })
     setCursors({ 0: undefined })
     setPreview(value)
-    const found = (await invoke("issues", {})) as Issue[]
+    const found = await invoke("issues", {}, Issues)
     setIssues(found.filter((issue) => issue.state === "open").map((issue) => issue.id))
   }, [bounds, invoke, key, recipe, run, sheet])
 
   const edit = useCallback(
     async (row: GridValidRowModel, old: GridValidRowModel) => {
       if (!preview) throw new Error("Preview is not loaded")
+      const next = z.object({
+        _veritly_id: z.string().uuid(),
+        _veritly_version: z.number().int().nonnegative(),
+      }).passthrough().parse(row)
       const changed = Object.fromEntries(
-        Object.entries(row).filter(([field, value]) => value !== old[field] && !field.startsWith("_veritly_")),
+        Object.entries(next).filter(([field, value]) => value !== old[field] && !field.startsWith("_veritly_")),
       )
-      if (Object.keys(changed).length === 0) return row
-      const value = (await run("edit", {
+      if (Object.keys(changed).length === 0) return next
+      const value = await run("edit", {
         dataset: preview.dataset,
-        row: row._veritly_id,
-        input: { expectedVersion: row._veritly_version, values: changed },
-      })) as Row
+        row: next._veritly_id,
+        input: { expectedVersion: next._veritly_version, values: changed },
+      }, Row)
       setPreview((current) => current ? {
         ...current,
         rows: current.rows.map((item) => item.id === value.id ? value : item),
@@ -307,9 +289,12 @@ export function App() {
     const values = Object.fromEntries(
       preview.columns
         .filter((item) => !item.system && item.owner !== "formula" && item.owner !== "derived")
-        .map((item) => [item.name, cell(draft[item.name] || "", item.type)]),
+        .map((item) => {
+          const value = draft[item.name]
+          return [item.name, cell(value === undefined ? "" : value, item.type)]
+        }),
     )
-    await run("insert", { dataset: preview.dataset, input: { values } })
+    await run("insert", { dataset: preview.dataset, input: { values } }, Row)
     setDraft(undefined)
     if (recipe) await database(recipe)
   }, [database, draft, preview, recipe, run])
@@ -318,7 +303,7 @@ export function App() {
     if (!preview) throw new Error("Database rows are not loaded")
     const row = preview.rows.find((item) => item.id === id)
     if (!row) throw new Error("Database row is no longer visible")
-    await run("remove", { dataset: preview.dataset, row: id, input: { expectedVersion: row.version } })
+    await run("remove", { dataset: preview.dataset, row: id, input: { expectedVersion: row.version } }, Receipt)
     if (recipe) await database(recipe)
   }, [database, preview, recipe, run])
 
@@ -329,10 +314,10 @@ export function App() {
     setBusy("rows")
     setError(undefined)
     try {
-      const page = (await invoke("rows", {
+      const page = await invoke("rows", {
         dataset: preview.dataset,
         input: { cursor, limit: 100 },
-      })) as Rows
+      }, Rows)
       setPaging(model)
       setCursors((current) => ({ ...current, [model.page + 1]: page.cursor }))
       setPreview((current) => current ? { ...current, rows: page.rows, truncated: Boolean(page.cursor) } : current)
@@ -353,7 +338,7 @@ export function App() {
   }
 
   const grid: GridColDef[] = [
-    ...(preview?.columns || []).map((item) => ({
+    ...(preview ? preview.columns : []).map((item) => ({
       field: item.name,
       headerName: item.name,
       editable: recipe?.state === "published" && !item.system && !item.key && item.owner !== "formula" && item.owner !== "derived",
@@ -369,12 +354,12 @@ export function App() {
           key="delete"
           icon={<DeleteIcon />}
           label="Delete row"
-          onClick={() => drop(String(id)).catch((cause: Error) => setError(cause.message))}
+          onClick={() => drop(String(id)).catch((cause: unknown) => setError(message(cause)))}
         />,
       ],
     }] : []),
   ]
-  const rows = (preview?.rows || []).map(gridrow)
+  const rows = (preview ? preview.rows : []).map(gridrow)
 
   const execute = async (name: "publish" | "writeback" | "reconcile") => {
     if (!recipe) throw new Error("Preparation recipe is not loaded")
@@ -386,20 +371,24 @@ export function App() {
           dataset: target.id,
         }
       : { expectedVersion: recipe.version }
-    return run(name, input).then(async (value) => {
-      const job = value as Job
+    return run(name, input, Job).then(async (job) => {
       const end = Date.now() + 60_000
       let current = job
       while (current.state === "queued" || current.state === "running") {
         if (Date.now() >= end) throw new Error(`${name} is still running; check its job status`)
         await new Promise((resolve) => window.setTimeout(resolve, 500))
-        current = (await invoke("status", { job: current.id })) as Job
+        current = await invoke("status", { job: current.id }, Job)
       }
-      if (current.state !== "succeeded") throw new Error(current.error || `${name} ended in ${current.state}`)
-      const [item, project] = await Promise.all([invoke("inspect"), invoke("project")])
-      const next = item as Recipe
+      if (current.state !== "succeeded") {
+        if (current.error) throw new Error(current.error)
+        throw new Error(`${name} ended in ${current.state}`)
+      }
+      const [next, project] = await Promise.all([
+        invoke("inspect", undefined, Recipe),
+        invoke("project", undefined, Project),
+      ])
       setRecipe(next)
-      setQuota((project as { quota: Quota }).quota)
+      setQuota(project.quota)
       await database(next)
       return current
     })
@@ -431,7 +420,7 @@ export function App() {
             <TextField size="small" label="Last data row" type="number" value={end} onChange={(event) => setEnd(Number(event.target.value))} />
             <TextField size="small" label="Columns (A,B,C)" value={columns} onChange={(event) => setColumns(event.target.value)} />
             <TextField size="small" label="Business key (optional)" value={key} onChange={(event) => setKey(event.target.value)} />
-            <Button variant="contained" disabled={!recipe || Boolean(busy)} onClick={() => prepare().catch((cause: Error) => setError(cause.message))}>Profile and preview</Button>
+            <Button variant="contained" disabled={!recipe || Boolean(busy)} onClick={() => prepare().catch((cause: unknown) => setError(message(cause)))}>Profile and preview</Button>
           </Stack>
         </Paper>
 
@@ -443,7 +432,7 @@ export function App() {
             pageSizeOptions={[100]}
             paginationMode={recipe?.state === "published" ? "server" : "client"}
             paginationModel={paging}
-            rowCount={preview?.total || 0}
+            rowCount={preview ? preview.total : 0}
             onPaginationModelChange={(model) => void paginate(model)}
             processRowUpdate={edit}
             onProcessRowUpdateError={(cause) => setError(cause instanceof Error ? cause.message : "Row update failed")}
@@ -460,11 +449,11 @@ export function App() {
                   key={item.id}
                   size="small"
                   label={item.name}
-                  value={draft[item.name] || ""}
+                  value={draft[item.name] === undefined ? "" : draft[item.name]}
                   onChange={(event) => setDraft((current) => ({ ...current, [item.name]: event.target.value }))}
                 />
               ))}
-              <Button variant="contained" disabled={Boolean(busy)} onClick={() => insert().catch((cause: Error) => setError(cause.message))}>Create row</Button>
+              <Button variant="contained" disabled={Boolean(busy)} onClick={() => insert().catch((cause: unknown) => setError(message(cause)))}>Create row</Button>
               <Button disabled={Boolean(busy)} onClick={() => setDraft(undefined)}>Cancel</Button>
             </Stack>
           </Paper>
@@ -472,9 +461,9 @@ export function App() {
 
         <Stack className="actions" direction="row" gap={1} justifyContent="flex-end">
           <Button startIcon={<AddIcon />} disabled={recipe?.state !== "published" || Boolean(busy)} onClick={() => setDraft({})}>Add row</Button>
-          <Button startIcon={<SaveAltIcon />} disabled={!recipe || recipe.source.kind !== "workbook" || Boolean(busy)} onClick={() => execute("writeback").catch((cause: Error) => setError(cause.message))}>Write back</Button>
-          <Button startIcon={<CompareArrowsIcon />} disabled={!recipe || recipe.source.kind !== "workbook" || Boolean(busy)} onClick={() => execute("reconcile").catch((cause: Error) => setError(cause.message))}>Reconcile</Button>
-          <Button variant="contained" startIcon={<CloudUploadIcon />} disabled={!recipe || Boolean(busy)} onClick={() => execute("publish").catch((cause: Error) => setError(cause.message))}>Publish</Button>
+          <Button startIcon={<SaveAltIcon />} disabled={!recipe || recipe.source.kind !== "workbook" || Boolean(busy)} onClick={() => execute("writeback").catch((cause: unknown) => setError(message(cause)))}>Write back</Button>
+          <Button startIcon={<CompareArrowsIcon />} disabled={!recipe || recipe.source.kind !== "workbook" || Boolean(busy)} onClick={() => execute("reconcile").catch((cause: unknown) => setError(message(cause)))}>Reconcile</Button>
+          <Button variant="contained" startIcon={<CloudUploadIcon />} disabled={!recipe || Boolean(busy)} onClick={() => execute("publish").catch((cause: unknown) => setError(message(cause)))}>Publish</Button>
         </Stack>
       </Box>
     </ThemeProvider>
@@ -495,13 +484,15 @@ function table(path: string) {
   return value
 }
 
-function output(recipe: Recipe) {
+function output(recipe: RecipeType) {
   const command = recipe.commands.filter((item) => item.kind === "output").at(-1)
-  if (!command?.table || !command.class) throw new Error("Preparation recipe has no published output")
+  if (!command) throw new Error("Preparation recipe has no published output")
+  if (!command.table) throw new Error("Preparation output has no table")
+  if (!command.class) throw new Error("Preparation output has no class")
   return { id: command.id, table: command.table, class: command.class }
 }
 
-function gridrow(row: Row) {
+function gridrow(row: RowType) {
   return { ...row.values, _veritly_id: row.id, _veritly_version: row.version }
 }
 
@@ -511,12 +502,12 @@ function bytes(value: number) {
   return `${value} B`
 }
 
-function quotaLabel(quota: Quota) {
+function quotaLabel(quota: QuotaType) {
   const state = quota.percent >= 90 ? " — critical" : quota.percent >= 80 ? " — warning" : ""
   return `${bytes(quota.used)} / ${bytes(quota.limit)} (${quota.percent.toFixed(1)}%)${state}`
 }
 
-function cell(value: string, type: Preview["columns"][number]["type"]) {
+function cell(value: string, type: PreviewType["columns"][number]["type"]) {
   if (!value) return null
   if (type === "boolean") {
     if (value.toLowerCase() === "true") return true
@@ -534,4 +525,9 @@ function cell(value: string, type: Preview["columns"][number]["type"]) {
     return parsed
   }
   return value
+}
+
+function message(cause: unknown) {
+  if (cause instanceof Error) return cause.message
+  throw new Error("Data preparation failed with a non-error rejection", { cause })
 }
