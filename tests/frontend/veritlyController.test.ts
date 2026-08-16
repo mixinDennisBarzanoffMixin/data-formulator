@@ -361,6 +361,113 @@ describe("Veritly preparation controller", () => {
     fetcher.mockRestore()
   })
 
+  test("loads persisted datasets through row APIs and recipe queries through previews", async () => {
+    const { PrepStudio } = await import("../../src/veritly/controller")
+    const post = vi.spyOn(window, "postMessage").mockImplementation(() => undefined)
+    const calls: string[] = []
+    const dataset = {
+      id: "stored",
+      prep: "recipe",
+      project: "project",
+      class: "entity" as const,
+      schema: "sales_abcd1234",
+      table: "sales",
+      columns: [{
+        id: "order_id",
+        name: "Order ID",
+        type: "text" as const,
+        owner: "shared" as const,
+        nullable: false,
+        key: true,
+      }],
+      keys: ["Order ID"],
+      rows: 1,
+      bytes: 1,
+      version: 1,
+    }
+    const fetcher = vi.spyOn(window, "fetch").mockImplementation(async (input, init) => {
+      const url = String(input)
+      calls.push(url)
+      if (url.endsWith("/preps/recipe") && !init?.method) return Response.json({
+        ...recipe(),
+        state: "published",
+        baseline: { workbook: 4, recipe: 1, dataset: 1, hash: "sha256:baseline" },
+      })
+      if (url.endsWith("/project")) return Response.json({
+        id: "project",
+        state: "ready",
+        quota: { used: 1, limit: 10_737_418_240, percent: 0 },
+        revision: 1,
+        preps: [],
+      })
+      if (url.endsWith("/datasets")) return Response.json({ datasets: [dataset] })
+      if (url.endsWith("/issues")) return Response.json({ issues: [] })
+      if (url.endsWith("/workbooks")) return Response.json({
+        workbooks: [{ file: "file-1", path: "Sales.xlsx", revision: 4, updated: 1 }],
+      })
+      if (url.endsWith("/mapping")) return Response.json({
+        prep: "recipe",
+        version: 1,
+        state: "published",
+        source: { kind: "workbook", file: "file-1", path: "Sales.xlsx", revision: 4 },
+        sources: [],
+        targets: [],
+      })
+      if (url.endsWith("/workbook")) return Response.json({
+        file: "file-1",
+        revision: 4,
+        sheets: [{
+          name: "Rows",
+          rows: { start: 1, end: 10 },
+          columns: { start: 1, end: 3 },
+          visibility: "visible",
+          regions: [{ header: 1, start: 2, end: 10, left: 1, right: 3 }],
+        }],
+      })
+      if (url.includes("/datasets/stored/rows?")) return Response.json({
+        rows: [{ id: "da3c7195-60b7-43da-8d2d-08fcc4298e69", version: 1, values: { "Order ID": "A-1" } }],
+      })
+      if (url.endsWith("/preview")) return Response.json({
+        dataset: "entity-rows",
+        columns: dataset.columns,
+        rows: [],
+        total: 1,
+        truncated: false,
+      })
+      throw new Error(`Unexpected data request: ${url}`)
+    })
+    const model = new PrepStudio()
+    model.mount()
+
+    receive({
+      type: "veritly.iframe.open",
+      frame: "dataprep:project",
+      request: 3,
+      path: "Sales.prep",
+      payload: { recipe: "recipe", project: "project" },
+    })
+    await vi.waitFor(() => expect(model.get().phase).toBe("ready"))
+    expect(model.get().error).toBeUndefined()
+    await vi.waitFor(() => expect(model.get().preview?.dataset).toBe("stored"))
+
+    calls.length = 0
+    await model.show({ dataset: "stored" })
+    expect(calls.some((url) => url.includes("/datasets/stored/rows?"))).toBe(true)
+    expect(calls.some((url) => url.endsWith("/preview"))).toBe(false)
+    expect(model.get().preview?.rows[0]?.values).toEqual({ "Order ID": "A-1" })
+
+    calls.length = 0
+    await model.show({ dataset: "entity-rows", step: "key-command" })
+    expect(calls.some((url) => url.endsWith("/preview"))).toBe(true)
+    expect(calls.some((url) => url.includes("/datasets/stored/rows?"))).toBe(false)
+    expect(model.get().preview?.dataset).toBe("entity-rows")
+    expect(() => model.show({ dataset: "stored", unknown: true })).toThrow()
+
+    model.unmount()
+    post.mockRestore()
+    fetcher.mockRestore()
+  })
+
   test("builds typed transform steps and preserves output ownership", async () => {
     const model = await import("../../src/veritly/model")
     const prep = model.recipe(recipe())

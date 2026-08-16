@@ -70,6 +70,7 @@ import {
 type Core = Omit<StudioState, "gates">
 
 const DatasetInput = z.strictObject({ dataset: z.string().trim().min(1).max(256) })
+const ShowInput = DatasetInput.extend({ step: z.string().trim().min(1).max(256).optional() }).strict()
 const RegionInput = z.number().int().nonnegative()
 const Patch = z.record(z.string(), z.unknown())
 export class PrepStudio {
@@ -355,6 +356,14 @@ export class PrepStudio {
       })
       return result
     }))
+  }
+
+  show(input: unknown) {
+    const value = ShowInput.parse(input)
+    this.view({ dataset: value.dataset, surface: "rows", ...(value.step ? { step: value.step } : {}) })
+    const dataset = this.get().datasets.find((item) => item.id === value.dataset)
+    if (!dataset) return this.preview({ dataset: value.dataset, limit: 100 })
+    return this.#run("rows", () => this.#rows(dataset))
   }
 
   page(input: unknown) {
@@ -648,21 +657,27 @@ export class PrepStudio {
     const target = need(output(prep), "Published preparation has no output")
     const dataset = list.find((item) => item.prep === prep.id && item.table === target.table && item.class === target.class)
     if (!dataset) throw new Error(`Published dataset is unavailable: ${target.table}`)
+    await this.#rows(dataset)
+  }
+
+  async #rows(dataset: Dataset) {
     const page = await this.#invoke("rows", { dataset: dataset.id, input: { limit: 100 } }, Rows)
+    const preview = Object.freeze({
+      dataset: dataset.id,
+      columns: Object.freeze([...dataset.columns]),
+      rows: Object.freeze([...page.rows]),
+      total: dataset.rows,
+      truncated: page.cursor !== undefined,
+    })
     this.#cursors.clear()
     this.#cursors.set(0, undefined)
     this.#cursors.set(1, page.cursor)
     this.#next({
-      preview: Object.freeze({
-        dataset: dataset.id,
-        columns: Object.freeze([...dataset.columns]),
-        rows: Object.freeze([...page.rows]),
-        total: dataset.rows,
-        truncated: page.cursor !== undefined,
-      }),
+      preview,
       paging: Object.freeze({ page: 0, pageSize: 100 }),
       view: Object.freeze({ ...this.get().view, dataset: dataset.id }),
     })
+    return preview
   }
 
   #issues() {

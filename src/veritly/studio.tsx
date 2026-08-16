@@ -206,7 +206,7 @@ function RowTools({ model, state, dataset }: ViewProps & { dataset?: string }) {
   return (
     <>
       <Box className="ribbon-group">
-        <Button startIcon={<RefreshIcon />} disabled={!dataset || Boolean(state.busy)} onClick={() => dataset && act(model.preview({ dataset, limit: 100 }))}>
+        <Button startIcon={<RefreshIcon />} disabled={!dataset || Boolean(state.busy)} onClick={() => dataset && act(model.show({ dataset }))}>
           Refresh rows
         </Button>
         <Action gate={state.gates.profile} label="Profile the selected query">
@@ -273,7 +273,7 @@ function Queries({ model, state }: ViewProps) {
               className={`query-row${selected ? " selected" : ""}`}
               key={command.id}
               type="button"
-              onClick={() => dataset && show(model, dataset, command.id)}
+              onClick={() => dataset && act(model.show({ dataset, step: command.id }))}
             >
               <GridViewIcon fontSize="small" color={command.kind === "output" ? "primary" : "inherit"} />
               <Box minWidth={0}>
@@ -288,7 +288,7 @@ function Queries({ model, state }: ViewProps) {
             className={`query-row${state.view.dataset === dataset.id ? " selected" : ""}`}
             key={dataset.id}
             type="button"
-            onClick={() => show(model, dataset.id)}
+            onClick={() => act(model.show({ dataset: dataset.id }))}
           >
             <StorageIcon fontSize="small" color="primary" />
             <Box minWidth={0}>
@@ -710,7 +710,7 @@ function Settings({ model, state }: ViewProps) {
             type="button"
             onClick={() => {
               const dataset = target(command)
-              if (dataset) show(model, dataset, command.id)
+              if (dataset) act(model.show({ dataset, step: command.id }))
               if (!dataset) model.view({ step: command.id })
             }}
           >
@@ -1008,11 +1008,6 @@ type ViewProps = { model: PrepStudio; state: StudioState }
 
 function act(task: Promise<unknown>) {
   void task.then(() => undefined, () => undefined)
-}
-
-function show(model: PrepStudio, dataset: string, step?: string) {
-  model.view(step ? { dataset, step, surface: "rows" } : { dataset, surface: "rows" })
-  act(model.preview({ dataset, limit: 100 }))
 }
 
 function select(model: PrepStudio, config: PrepConfig, patch: Partial<PrepConfig>) {
