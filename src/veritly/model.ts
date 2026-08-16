@@ -469,7 +469,7 @@ export function bounds(value: StudioCatalog, name?: string): PrepConfig {
   if (!region) return Object.freeze({
     sheet: sheet.name,
     header: sheet.rows.start,
-    start: sheet.rows.start,
+    start: Math.min(sheet.rows.start + 1, sheet.rows.end),
     end: sheet.rows.end,
     columns: Object.freeze([]),
     keys: Object.freeze([]),

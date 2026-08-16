@@ -6,6 +6,30 @@ beforeAll(() => {
 })
 
 describe("Veritly preparation controller", () => {
+  test("opens an undetected worksheet as an editable manual range", async () => {
+    const model = await import("../../src/veritly/model")
+    const book = model.catalog({
+      file: "file-1",
+      revision: 1,
+      sheets: [{
+        name: "Rows",
+        rows: { start: 4, end: 20 },
+        columns: { start: 2, end: 6 },
+        visibility: "visible",
+        regions: [],
+      }],
+    })
+
+    expect(model.bounds(book, "Rows")).toEqual({
+      sheet: "Rows",
+      header: 4,
+      start: 5,
+      end: 20,
+      columns: [],
+      keys: [],
+    })
+  })
+
   test("owns immutable navigation, range, and draft state", async () => {
     const { PrepStudio } = await import("../../src/veritly/controller")
     const model = new PrepStudio()
