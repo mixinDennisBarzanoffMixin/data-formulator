@@ -21,7 +21,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 from flask import Flask, Response, after_this_request, jsonify, request, send_file, stream_with_context
 from openpyxl import load_workbook
-from openpyxl.utils.cell import column_index_from_string, range_boundaries
+from openpyxl.utils.cell import column_index_from_string
 from data_formulator.veritly_recipe import RecipeError, execute as execute_recipe, rewrite_metadata
 
 
@@ -165,7 +165,8 @@ def catalog(path: Path) -> dict[str, object]:
             raise ValueError("XLSX exceeds the worksheet limit")
         sheets = []
         for sheet in book.worksheets:
-            left, start, right, end = range_boundaries(sheet.calculate_dimension(force=True))
+            bounds, found = inspect(archive, sheet)
+            left, start, right, end = bounds
             if not all(isinstance(item, int) for item in [left, start, right, end]):
                 raise ValueError("Worksheet has no bounded used range")
             if start < 1 or end > MAX_ROWS or end < start:
@@ -179,7 +180,7 @@ def catalog(path: Path) -> dict[str, object]:
                 "rows": {"start": start, "end": end},
                 "columns": {"start": left, "end": right},
                 "visibility": sheet.sheet_state,
-                "regions": regions(archive, sheet),
+                "regions": found,
             })
         return {"sheets": sheets}
     finally:
@@ -187,18 +188,28 @@ def catalog(path: Path) -> dict[str, object]:
         book.close()
 
 
-def regions(archive: zipfile.ZipFile, sheet) -> list[dict[str, int]]:
+def inspect(archive: zipfile.ZipFile, sheet) -> tuple[tuple[int, int, int, int], list[dict[str, int]]]:
     source = getattr(sheet, "_worksheet_path", None)
     if not isinstance(source, str) or not source:
         raise ValueError("Worksheet XML path is unavailable")
     active: list[dict[str, int]] = []
     found: list[dict[str, int]] = []
+    bounds: list[int] | None = None
     with archive.open(source) as body:
         for _, element in etree.iterparse(body, events=("end",)):
             if element.tag.rsplit("}", 1)[-1] != "row":
                 continue
             number = row_number(element)
-            columns = row_columns(element)
+            raw, columns = row_columns(element, number)
+            if raw and bounds is None:
+                bounds = [min(raw), number, max(raw), number]
+            elif raw and bounds is not None:
+                bounds = [
+                    min(bounds[0], min(raw)),
+                    min(bounds[1], number),
+                    max(bounds[2], max(raw)),
+                    max(bounds[3], number),
+                ]
             next_active: list[dict[str, int]] = []
             for item in active:
                 hits = sum(item["left"] <= column <= item["right"] for column in columns)
@@ -253,7 +264,9 @@ def regions(archive: zipfile.ZipFile, sheet) -> list[dict[str, int]]:
         selected.append(region)
         if len(selected) == MAX_REGIONS:
             break
-    return selected
+    if bounds is None:
+        return (1, 1, 1, 1), selected
+    return (bounds[0], bounds[1], bounds[2], bounds[3]), selected
 
 
 def row_number(row) -> int:
@@ -266,20 +279,26 @@ def row_number(row) -> int:
     return number
 
 
-def row_columns(row) -> list[int]:
+def row_columns(row, number: int) -> tuple[list[int], list[int]]:
+    raw: list[int] = []
     columns = []
     for cell in row:
-        if cell.tag.rsplit("}", 1)[-1] != "c" or not populated(cell):
+        if cell.tag.rsplit("}", 1)[-1] != "c":
             continue
-        raw = cell.attrib.get("r")
-        if not isinstance(raw, str):
+        reference = cell.attrib.get("r")
+        if not isinstance(reference, str):
             raise ValueError("Worksheet cell reference is invalid")
-        letters = raw.rstrip("0123456789")
+        letters = reference.rstrip("0123456789")
+        digits = reference[len(letters):]
+        if not letters or not digits.isdigit() or int(digits) != number:
+            raise ValueError("Worksheet cell reference is invalid")
         column = column_index_from_string(letters)
         if column < 1 or column > MAX_COLUMNS:
             raise ValueError("Worksheet column exceeds Excel bounds")
-        columns.append(column)
-    return sorted(set(columns))
+        raw.append(column)
+        if populated(cell):
+            columns.append(column)
+    return sorted(set(raw)), sorted(set(columns))
 
 
 def populated(cell) -> bool:

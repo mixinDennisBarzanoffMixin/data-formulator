@@ -49,6 +49,22 @@ def unsized() -> bytes:
     return output.getvalue()
 
 
+def empty() -> bytes:
+    book = Workbook()
+    book.active.title = "Empty"
+    data = io.BytesIO()
+    book.save(data)
+    output = io.BytesIO()
+    with zipfile.ZipFile(io.BytesIO(data.getvalue())) as source, zipfile.ZipFile(output, "w") as target:
+        for item in source.infolist():
+            content = source.read(item)
+            if item.filename == "xl/worksheets/sheet1.xml":
+                content, count = re.subn(br"<dimension[^>]*/>", b"", content, count=1)
+                assert count == 1
+            target.writestr(item, content)
+    return output.getvalue()
+
+
 def test_workbook_catalog_returns_only_bounded_sheet_metadata(monkeypatch):
     monkeypatch.setenv("DATA_WORKER_TOKEN", "secret")
     response = app.test_client().post(
@@ -63,7 +79,7 @@ def test_workbook_catalog_returns_only_bounded_sheet_metadata(monkeypatch):
             {
                 "name": "Transactions",
                 "rows": {"start": 1, "end": 100},
-                "columns": {"start": 1, "end": 11},
+                "columns": {"start": 2, "end": 11},
                 "visibility": "visible",
                 "regions": [
                     {"header": 1, "start": 2, "end": 5, "left": 2, "right": 4},
@@ -100,12 +116,32 @@ def test_workbook_catalog_streams_dimensions_when_the_xlsx_omits_them(monkeypatc
     assert response.get_json()["sheets"][0] == {
         "name": "Transactions",
         "rows": {"start": 1, "end": 100},
-        "columns": {"start": 1, "end": 11},
+        "columns": {"start": 2, "end": 11},
         "visibility": "visible",
         "regions": [
             {"header": 1, "start": 2, "end": 5, "left": 2, "right": 4},
             {"header": 2, "start": 3, "end": 3, "left": 8, "right": 9},
         ],
+    }
+
+
+def test_workbook_catalog_defaults_an_unsized_empty_sheet_to_a1(monkeypatch):
+    monkeypatch.setenv("DATA_WORKER_TOKEN", "secret")
+    response = app.test_client().post(
+        "/workbook",
+        data={"file": (io.BytesIO(empty()), "empty.xlsx")},
+        headers={"x-veritly-service-token": "secret"},
+        content_type="multipart/form-data",
+    )
+    assert response.status_code == 200
+    assert response.get_json() == {
+        "sheets": [{
+            "name": "Empty",
+            "rows": {"start": 1, "end": 1},
+            "columns": {"start": 1, "end": 1},
+            "visibility": "visible",
+            "regions": [],
+        }]
     }
 
 
