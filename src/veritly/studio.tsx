@@ -438,7 +438,7 @@ export function App() {
             pageSizeOptions={[100]}
             paginationMode={recipe?.state === "published" ? "server" : "client"}
             paginationModel={paging}
-            rowCount={preview ? preview.total : 0}
+            {...(recipe?.state === "published" ? { rowCount: preview ? preview.total : 0 } : {})}
             onPaginationModelChange={(model) => void paginate(model)}
             processRowUpdate={edit}
             onProcessRowUpdateError={(cause) => setError(cause instanceof Error ? cause.message : "Row update failed")}
