@@ -165,7 +165,7 @@ def catalog(path: Path) -> dict[str, object]:
             raise ValueError("XLSX exceeds the worksheet limit")
         sheets = []
         for sheet in book.worksheets:
-            left, start, right, end = range_boundaries(sheet.calculate_dimension())
+            left, start, right, end = range_boundaries(sheet.calculate_dimension(force=True))
             if not all(isinstance(item, int) for item in [left, start, right, end]):
                 raise ValueError("Worksheet has no bounded used range")
             if start < 1 or end > MAX_ROWS or end < start:

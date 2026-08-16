@@ -1,4 +1,5 @@
 import io
+import re
 import zipfile
 
 from openpyxl import Workbook
@@ -34,6 +35,18 @@ def xlsx() -> bytes:
     data = io.BytesIO()
     book.save(data)
     return data.getvalue()
+
+
+def unsized() -> bytes:
+    output = io.BytesIO()
+    with zipfile.ZipFile(io.BytesIO(xlsx())) as source, zipfile.ZipFile(output, "w") as target:
+        for item in source.infolist():
+            data = source.read(item)
+            if item.filename == "xl/worksheets/sheet1.xml":
+                data, count = re.subn(br"<dimension[^>]*/>", b"", data, count=1)
+                assert count == 1
+            target.writestr(item, data)
+    return output.getvalue()
 
 
 def test_workbook_catalog_returns_only_bounded_sheet_metadata(monkeypatch):
@@ -72,6 +85,27 @@ def test_workbook_catalog_returns_only_bounded_sheet_metadata(monkeypatch):
                 "regions": [],
             },
         ]
+    }
+
+
+def test_workbook_catalog_streams_dimensions_when_the_xlsx_omits_them(monkeypatch):
+    monkeypatch.setenv("DATA_WORKER_TOKEN", "secret")
+    response = app.test_client().post(
+        "/workbook",
+        data={"file": (io.BytesIO(unsized()), "unsized.xlsx")},
+        headers={"x-veritly-service-token": "secret"},
+        content_type="multipart/form-data",
+    )
+    assert response.status_code == 200
+    assert response.get_json()["sheets"][0] == {
+        "name": "Transactions",
+        "rows": {"start": 1, "end": 100},
+        "columns": {"start": 1, "end": 11},
+        "visibility": "visible",
+        "regions": [
+            {"header": 1, "start": 2, "end": 5, "left": 2, "right": 4},
+            {"header": 2, "start": 3, "end": 3, "left": 8, "right": 9},
+        ],
     }
 
 
