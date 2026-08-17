@@ -110,6 +110,37 @@ describe("Veritly preparation protocol", () => {
     })
   })
 
+  test("resolves a ready export to the direct authenticated content URL", async () => {
+    const protocol = await import("../../src/veritly/protocol")
+    const fetcher = vi.spyOn(window, "fetch").mockResolvedValue(Response.json({
+      id: "export-file",
+      state: "ready",
+      name: "Project Data.dump",
+      size: 1_024,
+      hash: "a".repeat(64),
+      expires: Date.now() + 60_000,
+    }))
+    const bridge = new protocol.Bridge(() => ({ path: "Sales.prep", project: "project", recipe: "recipe" }))
+
+    await expect(bridge.invoke("exportFile", { export: "export-file" }, protocol.ExportFile)).resolves.toEqual({
+      name: "Project Data.dump",
+      url: "http://data.localhost/project/project/api/data/exports/export-file/content",
+    })
+    expect(fetcher).toHaveBeenCalledOnce()
+    expect(fetcher.mock.calls[0]?.[0]).toBe("http://data.localhost/project/project/api/data/exports/export-file")
+  })
+
+  test("uses a transient anchor for the browser-owned download", async () => {
+    const protocol = await import("../../src/veritly/protocol")
+    const click = vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(() => undefined)
+    new protocol.BrowserSaver().save({
+      name: "Project Data.dump",
+      url: "http://data.localhost/project/project/api/data/exports/export-file/content",
+    })
+    expect(click).toHaveBeenCalledOnce()
+    expect(document.querySelector('a[download="Project Data.dump"]')).toBeNull()
+  })
+
   test("throws unsupported operations without a parent relay", async () => {
     const protocol = await import("../../src/veritly/protocol")
     const bridge = new protocol.Bridge(() => ({ path: "Sales.prep", project: "project", recipe: "recipe" }))

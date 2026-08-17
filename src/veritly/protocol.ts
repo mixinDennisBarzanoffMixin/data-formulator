@@ -3,6 +3,7 @@ import {
   ApplyCommandsInput,
   ApplyInput,
   EditInput,
+  Export as DataExport,
   InsertInput,
   Mapping as DataMapping,
   PreviewInput,
@@ -296,6 +297,30 @@ export const Job = z.object({
 })
 export type Job = z.infer<typeof Job>
 
+export const Export = DataExport
+export const ExportFile = z.strictObject({
+  name: z.string().trim().min(1),
+  url: z.string().url().refine((value) => new URL(value).origin === query.api, "Export URL must use the data API origin"),
+})
+export type ExportFile = z.infer<typeof ExportFile>
+
+export interface Saver {
+  save(file: ExportFile): void
+}
+
+export class BrowserSaver implements Saver {
+  save(file: ExportFile) {
+    const link = document.createElement("a")
+    link.href = file.url
+    link.download = file.name
+    link.rel = "noopener"
+    link.style.display = "none"
+    document.body.append(link)
+    link.click()
+    link.remove()
+  }
+}
+
 export const Quota = z.object({
   used: z.number().int().nonnegative(),
   limit: z.number().int().positive(),
@@ -406,6 +431,16 @@ export class Bridge {
     if (action === "cancel") return client.cancel(current.project, JobInput.parse(input).job)
     if (action === "quota") return client.quota(current.project)
     if (action === "export") return client.export(current.project)
+    if (action === "exportFile") {
+      const value = ExportInput.parse(input)
+      return client.exportStatus(current.project, value.export).then((file) => {
+        if (file.state !== "ready") throw new Error(`Project data export is ${file.state}`)
+        return ExportFile.parse({
+          name: file.name,
+          url: client.exportContentUrl(current.project, file.id),
+        })
+      })
+    }
     throw new Error(`Unsupported data preparation action: ${action}`)
   }
 }
@@ -415,6 +450,7 @@ const IssueInput = z.strictObject({ issue: Id, resolution: z.unknown() })
 const RowInput = z.strictObject({ dataset: Id, input: z.unknown() })
 const EditRowInput = RowInput.extend({ row: Id })
 const JobInput = z.strictObject({ job: Id })
+const ExportInput = z.strictObject({ export: Id })
 
 export function parse(value: unknown) {
   return Incoming.safeParse(value)

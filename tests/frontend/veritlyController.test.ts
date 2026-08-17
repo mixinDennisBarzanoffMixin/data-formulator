@@ -32,7 +32,7 @@ describe("Veritly preparation controller", () => {
 
   test("owns immutable navigation, range, and draft state", async () => {
     const { PrepStudio } = await import("../../src/veritly/controller")
-    const model = new PrepStudio()
+    const model = new PrepStudio(saver())
     const watch = vi.fn()
     const stop = model.subscribe(watch)
 
@@ -155,7 +155,7 @@ describe("Veritly preparation controller", () => {
       }
       throw new Error(`Unexpected data request: ${url}`)
     })
-    const model = new PrepStudio()
+    const model = new PrepStudio(saver())
     model.mount()
 
     receive({
@@ -327,7 +327,7 @@ describe("Veritly preparation controller", () => {
       })
       throw new Error(`Unexpected data request: ${url}`)
     })
-    const model = new PrepStudio()
+    const model = new PrepStudio(saver())
     model.mount()
 
     receive({
@@ -395,10 +395,11 @@ describe("Veritly preparation controller", () => {
     fetcher.mockRestore()
   })
 
-  test("loads persisted datasets through row APIs and recipe queries through previews", async () => {
+  test("loads persisted datasets and downloads a completed project export directly", async () => {
     const { PrepStudio } = await import("../../src/veritly/controller")
     const post = vi.spyOn(window, "postMessage").mockImplementation(() => undefined)
     const calls: string[] = []
+    const files: { name: string; url: string }[] = []
     const dataset = {
       id: "stored",
       prep: "recipe",
@@ -422,6 +423,32 @@ describe("Veritly preparation controller", () => {
     const fetcher = vi.spyOn(window, "fetch").mockImplementation(async (input, init) => {
       const url = String(input)
       calls.push(url)
+      if (url.endsWith("/exports") && init?.method === "POST") return Response.json({
+        id: "export-job",
+        resource: "export-file",
+        kind: "export",
+        state: "queued",
+        progress: 0,
+        created: 1,
+        updated: 1,
+      })
+      if (url.endsWith("/jobs/export-job")) return Response.json({
+        id: "export-job",
+        resource: "export-file",
+        kind: "export",
+        state: "succeeded",
+        progress: 1,
+        created: 1,
+        updated: 2,
+      })
+      if (url.endsWith("/exports/export-file")) return Response.json({
+        id: "export-file",
+        state: "ready",
+        name: "Project Data.dump",
+        size: 1_024,
+        hash: "a".repeat(64),
+        expires: Date.now() + 60_000,
+      })
       if (url.endsWith("/preps/recipe") && !init?.method) return Response.json({
         ...recipe(),
         state: "published",
@@ -470,7 +497,7 @@ describe("Veritly preparation controller", () => {
       })
       throw new Error(`Unexpected data request: ${url}`)
     })
-    const model = new PrepStudio()
+    const model = new PrepStudio(saver(files))
     model.mount()
 
     receive({
@@ -496,6 +523,13 @@ describe("Veritly preparation controller", () => {
     expect(calls.some((url) => url.includes("/datasets/stored/rows?"))).toBe(false)
     expect(model.get().preview?.dataset).toBe("entity-rows")
     expect(() => model.show({ dataset: "stored", unknown: true })).toThrow()
+
+    await model.export()
+    expect(files).toEqual([{
+      name: "Project Data.dump",
+      url: "http://data.localhost/project/project/api/data/exports/export-file/content",
+    }])
+    expect(calls.some((url) => url.endsWith("/exports/export-file/content"))).toBe(false)
 
     model.unmount()
     post.mockRestore()
@@ -631,4 +665,8 @@ function recipe() {
 
 function receive(data: unknown) {
   window.dispatchEvent(new MessageEvent("message", { data, origin: "http://localhost", source: window }))
+}
+
+function saver(files: { name: string; url: string }[] = []) {
+  return { save(file: { name: string; url: string }) { files.push(file) } }
 }

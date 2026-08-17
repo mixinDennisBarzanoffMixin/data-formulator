@@ -3,6 +3,8 @@ import { z } from "zod"
 import {
   Bridge,
   Datasets,
+  BrowserSaver,
+  ExportFile,
   Incoming,
   Job,
   Mapping,
@@ -26,6 +28,7 @@ import {
   type Job as JobType,
   type Open,
   type Preview as PreviewType,
+  type Saver,
 } from "./protocol"
 import {
   Cells,
@@ -82,7 +85,7 @@ export class PrepStudio {
   #stale = false
   #mounted = false
 
-  constructor() {
+  constructor(readonly saver: Saver) {
     const state: Core = Object.freeze({
       phase: "idle",
       config: blank(),
@@ -488,10 +491,18 @@ export class PrepStudio {
     this.#assert(this.get().gates.export)
     return this.#run("export", () => this.#invoke("export", undefined, Job).then((job) => {
       this.#next({ job })
-      return this.#poll(job, Date.now() + 60_000)
+      return this.#poll(job, Date.now() + 600_000)
     }).then((job) => {
       this.#next({ job })
-      return job
+      if (job.state !== "succeeded") {
+        if (job.error) throw new Error(job.error)
+        throw new Error(`export ended in ${job.state}`)
+      }
+      const id = need(job.resource, "Project data export has no resource identifier")
+      return this.#invoke("exportFile", { export: id }, ExportFile).then((file) => {
+        this.saver.save(file)
+        return job
+      })
     }))
   }
 
@@ -847,7 +858,7 @@ export class PrepStudio {
 }
 
 export function studio() {
-  return new PrepStudio()
+  return new PrepStudio(new BrowserSaver())
 }
 
 function selected(value: PrepConfig) {
