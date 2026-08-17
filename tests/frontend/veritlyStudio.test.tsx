@@ -79,6 +79,20 @@ describe("Veritly preparation studio", () => {
           },
         ],
       })
+      if (url.endsWith("/preview")) return Response.json({
+        dataset: "source-rows",
+        columns: [
+          { id: "source-rows:Order ID", name: "Order ID", type: "text", nullable: true, owner: "shared" },
+          { id: "source-rows:Amount", name: "Amount", type: "text", nullable: true, owner: "shared" },
+        ],
+        rows: [{
+          id: "da3c7195-60b7-43da-8d2d-08fcc4298e69",
+          version: 0,
+          values: { "Order ID": "A-1", Amount: "42" },
+        }],
+        total: 38,
+        truncated: true,
+      })
       throw new Error(`Unexpected data request: ${url}`)
     })
     render(<App />)
@@ -110,6 +124,9 @@ describe("Veritly preparation studio", () => {
     fireEvent.change(screen.getByRole("spinbutton", { name: "First column" }), { target: { value: "3" } })
     fireEvent.change(screen.getByRole("spinbutton", { name: "Last column" }), { target: { value: "7" } })
     expect(screen.getByText("C5:G44 · 38 rows")).toBeVisible()
+    fireEvent.click(screen.getByRole("button", { name: "Load preview" }))
+    expect(await screen.findByText("A-1")).toBeVisible()
+    expect(screen.getByText("38 selected rows · showing 1")).toBeVisible()
 
     fireEvent.mouseDown(screen.getByRole("combobox", { name: "Workbook" }))
     fireEvent.click(await screen.findByRole("option", { name: "Archive.xlsx · r2" }))

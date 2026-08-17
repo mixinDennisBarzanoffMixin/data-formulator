@@ -15,6 +15,7 @@ import RefreshIcon from "@mui/icons-material/Refresh"
 import SaveAltIcon from "@mui/icons-material/SaveAlt"
 import StorageIcon from "@mui/icons-material/Storage"
 import TableChartIcon from "@mui/icons-material/TableChart"
+import VisibilityIcon from "@mui/icons-material/Visibility"
 import {
   Alert,
   Box,
@@ -62,6 +63,11 @@ import type { Profile, Row } from "./protocol"
 type GridRow = GridValidRowModel & {
   _veritly_id: string
   _veritly_version: number
+}
+
+type SampleRow = GridValidRowModel & {
+  $id: string
+  $row: number
 }
 
 const RowIndex = z.coerce.number().int().positive().max(1_048_576)
@@ -169,6 +175,9 @@ function Navigation({ model, state }: ViewProps) {
       <Box className="ribbon-tools">
         {state.view.surface === "source" && (
           <Box className="ribbon-group">
+            <Action gate={state.gates.prepare} label="Preview the selected worksheet region">
+              <Button startIcon={<VisibilityIcon />} onClick={() => act(model.sample())}>Preview rows</Button>
+            </Action>
             <Action gate={state.gates.prepare} label="Analyze the selected worksheet region">
               <Button variant="contained" startIcon={<TableChartIcon />} onClick={() => act(model.prepare())}>
                 Analyze selection
@@ -431,9 +440,6 @@ function Source({ model, state }: ViewProps) {
             <Typography fontSize={15} fontWeight={700}>Choose a table-like region</Typography>
             <Typography color="text.secondary" fontSize={11}>Only this bounded range becomes row-level project data. Everything else remains untouched.</Typography>
           </Box>
-          <Action gate={state.gates.prepare} label="Analyze the selected range">
-            <Button variant="contained" startIcon={<TableChartIcon />} onClick={() => act(model.prepare())}>Analyze selection</Button>
-          </Action>
         </Box>
         {!sheet?.regions.length && (
           <Alert severity="info">No table-like range was detected. Enter the exact worksheet bounds below.</Alert>
@@ -532,7 +538,68 @@ function Source({ model, state }: ViewProps) {
             </Box>
           </Box>
         ) : undefined}
+        <SourceSample model={model} state={state} />
       </Box>
+    </Box>
+  )
+}
+
+function SourceSample({ model, state }: ViewProps) {
+  const sample = state.sample
+  return (
+    <Box className="source-preview">
+      <Box className="source-preview-head">
+        <Box>
+          <Typography fontSize={12} fontWeight={700}>Workbook row preview</Typography>
+          <Typography color="text.secondary" fontSize={10}>
+            {sample
+              ? `${sample.total.toLocaleString()} selected rows · showing ${sample.rows.length.toLocaleString()}`
+              : "Preview the bounded selection before creating the mapping."}
+          </Typography>
+        </Box>
+        <Action gate={state.gates.prepare} label="Reload the selected worksheet region">
+          <Button startIcon={<VisibilityIcon />} onClick={() => act(model.sample())}>
+            {sample ? "Refresh preview" : "Load preview"}
+          </Button>
+        </Action>
+      </Box>
+      {sample ? <Sample state={state} sample={sample} /> : (
+        <Box className="source-preview-empty">
+          <TableChartIcon color="disabled" sx={{ fontSize: 38 }} />
+          <Typography color="text.secondary" fontSize={11}>The workbook stays unchanged while this read-only preview is generated.</Typography>
+        </Box>
+      )}
+    </Box>
+  )
+}
+
+function Sample({ state, sample }: { state: StudioState; sample: Preview }) {
+  const rows: SampleRow[] = sample.rows.map((row, index) => ({
+    ...Object.fromEntries(sample.columns.map((column) => [column.id, row.values[column.name]])),
+    $id: row.id,
+    $row: state.config.start + index,
+  }))
+  const columns: GridColDef<SampleRow>[] = [
+    { field: "$row", headerName: "Row", width: 62, sortable: false, filterable: false },
+    ...sample.columns.map((column, index) => ({
+      field: column.id,
+      headerName: `${letters(state.config.columns[index])}  ${column.name}`,
+      minWidth: 145,
+      flex: 1,
+    })),
+  ]
+  return (
+    <Box className="source-preview-grid">
+      <DataGrid<SampleRow>
+        rows={rows}
+        columns={columns}
+        getRowId={(row) => row.$id}
+        density="compact"
+        disableRowSelectionOnClick
+        hideFooter
+        showToolbar
+        sx={{ border: 0, "& .MuiDataGrid-columnHeaders": { background: "#fafafa" } }}
+      />
     </Box>
   )
 }

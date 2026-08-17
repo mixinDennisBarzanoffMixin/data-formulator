@@ -127,7 +127,7 @@ export class PrepStudio {
     const value = Config.parse(input)
     const book = this.get().catalog
     const selected = book ? this.#selection(value, book) : freeze(value)
-    this.#next({ config: selected })
+    this.#next({ config: selected, sample: undefined })
     return selected
   }
 
@@ -135,7 +135,7 @@ export class PrepStudio {
     const name = z.string().trim().min(1).max(31).parse(input)
     const book = need(this.get().catalog, "Workbook catalog is not loaded")
     const selected = bounds(book, name)
-    this.#next({ config: selected, view: Object.freeze({ ...this.get().view, surface: "source" }) })
+    this.#next({ config: selected, sample: undefined, view: Object.freeze({ ...this.get().view, surface: "source" }) })
     return selected
   }
 
@@ -147,7 +147,7 @@ export class PrepStudio {
     const region = sheet.regions[index]
     if (!region) throw new Error(`Workbook region is unavailable: ${index}`)
     const selected = regionBounds(sheet.name, region)
-    this.#next({ config: selected, view: Object.freeze({ ...this.get().view, surface: "source" }) })
+    this.#next({ config: selected, sample: undefined, view: Object.freeze({ ...this.get().view, surface: "source" }) })
     return selected
   }
 
@@ -229,6 +229,24 @@ export class PrepStudio {
     this.#next({ transform: undefined })
   }
 
+  sample() {
+    this.#assert(this.get().gates.prepare)
+    return this.#run("sample", async () => {
+      const prep = need(this.get().recipe, "Preparation recipe is not loaded")
+      const form = selected(this.get().config)
+      const source = binding(prep, form)
+      const sample = await this.#invoke("preview", {
+        dataset: source.output,
+        limit: 100,
+        draft: { expectedVersion: prep.version, commands: [source] },
+      }, Preview)
+      if (this.get().config !== form) throw new Error("Workbook selection changed while previewing")
+      if (this.get().recipe !== prep) throw new Error("Preparation recipe changed while previewing")
+      this.#next({ sample })
+      return sample
+    })
+  }
+
   commitTransform() {
     return this.#run("transform", async () => {
       const draft = need(this.get().transform, "Transform editor is not open")
@@ -260,20 +278,7 @@ export class PrepStudio {
       const prep = need(state.recipe, "Preparation recipe is not loaded")
       if (prep.source.kind !== "workbook") throw new Error("Native data does not have a workbook range")
       const form = selected(state.config)
-      const left = Math.min(...form.columns)
-      const right = Math.max(...form.columns)
-      const source = Command.parse({
-        kind: "source",
-        id: "source-command",
-        after: [],
-        output: "source-rows",
-        file: prep.source.file,
-        path: prep.source.path,
-        revision: prep.source.revision,
-        sheet: form.sheet,
-        range: { header: form.header, start: form.start, end: form.end, left, right },
-      })
-      if (source.kind !== "source") throw new Error("Source command parser returned another command kind")
+      const source = binding(prep, form)
       const report = await this.#invoke("profile", {
         dataset: source.output,
         draft: { expectedVersion: prep.version, commands: [source] },
@@ -559,6 +564,7 @@ export class PrepStudio {
       transform: undefined,
       datasets: Object.freeze([]),
       profile: undefined,
+      sample: undefined,
       preview: undefined,
       issues: Object.freeze([]),
       quota: undefined,
@@ -646,6 +652,7 @@ export class PrepStudio {
       draft: invalid ? undefined : current.draft,
       transform: invalid ? undefined : current.transform,
       profile: invalid ? undefined : current.profile,
+      sample: invalid ? undefined : current.sample,
       preview: invalid ? undefined : current.preview,
       paging: invalid ? Object.freeze({ page: 0, pageSize: 100 }) : current.paging,
     })
@@ -848,6 +855,29 @@ function selected(value: PrepConfig) {
   if (!value.columns.length) throw new Error("At least one bounded Excel column is required")
   if (value.start <= value.header || value.end < value.start) throw new Error("Workbook row bounds are invalid")
   return value
+}
+
+function binding(prep: PrepRecipe, form: PrepConfig) {
+  if (prep.source.kind !== "workbook") throw new Error("Native data does not have a workbook range")
+  const command = Command.parse({
+    kind: "source",
+    id: "source-command",
+    after: [],
+    output: "source-rows",
+    file: prep.source.file,
+    path: prep.source.path,
+    revision: prep.source.revision,
+    sheet: form.sheet,
+    range: {
+      header: form.header,
+      start: form.start,
+      end: form.end,
+      left: Math.min(...form.columns),
+      right: Math.max(...form.columns),
+    },
+  })
+  if (command.kind !== "source") throw new Error("Source command parser returned another command kind")
+  return command
 }
 
 function table(path: string) {

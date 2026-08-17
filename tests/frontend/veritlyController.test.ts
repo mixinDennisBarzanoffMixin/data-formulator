@@ -132,10 +132,27 @@ describe("Veritly preparation controller", () => {
         }],
         issues: 0,
       })
-      if (url.endsWith("/preview")) return Response.json(
-        { code: "identity_invalid", message: "identity_invalid" },
-        { status: 409 },
-      )
+      if (url.endsWith("/preview")) {
+        const body = JSON.parse(String(init?.body)) as { dataset: string; draft: { commands: { kind: string }[] } }
+        if (body.dataset === "source-rows" && body.draft.commands.length === 1) return Response.json({
+          dataset: "source-rows",
+          columns: [
+            { id: "source-rows:Order ID", name: "Order ID", type: "text", nullable: true, owner: "shared" },
+            { id: "source-rows:Amount", name: "Amount", type: "text", nullable: true, owner: "shared" },
+          ],
+          rows: [{
+            id: "da3c7195-60b7-43da-8d2d-08fcc4298e69",
+            version: 0,
+            values: { "Order ID": "A-1", Amount: "42" },
+          }],
+          total: 18,
+          truncated: true,
+        })
+        return Response.json(
+          { code: "identity_invalid", message: "identity_invalid" },
+          { status: 409 },
+        )
+      }
       throw new Error(`Unexpected data request: ${url}`)
     })
     const model = new PrepStudio()
@@ -189,6 +206,22 @@ describe("Veritly preparation controller", () => {
       columns: [9, 10],
       keys: [],
     })
+    await model.sample()
+    expect(model.get().sample).toMatchObject({ dataset: "source-rows", total: 18 })
+    const sample = calls.filter((call) => call.url.endsWith("/preview")).at(-1)
+    if (!sample?.init?.body) throw new Error("Controller did not request the workbook sample")
+    expect(JSON.parse(String(sample.init.body))).toMatchObject({
+      dataset: "source-rows",
+      limit: 100,
+      draft: {
+        expectedVersion: 1,
+        commands: [{
+          kind: "source",
+          sheet: "Transactions",
+          range: { header: 2, start: 3, end: 20, left: 9, right: 10 },
+        }],
+      },
+    })
     expect(model.select({ ...model.get().config, sheet: "Archive" })).toEqual({
       sheet: "Archive",
       header: 4,
@@ -197,6 +230,7 @@ describe("Veritly preparation controller", () => {
       columns: [7, 8],
       keys: [],
     })
+    expect(model.get().sample).toBeUndefined()
     expect(model.select({ ...model.get().config, header: 1, start: 100, end: 100, columns: [1, 2, 3, 4, 5, 6, 7, 8, 9] })).toEqual({
       sheet: "Archive",
       header: 4,
@@ -208,7 +242,7 @@ describe("Veritly preparation controller", () => {
 
     const task = model.prepare()
     await expect(task).rejects.toThrow("identity_invalid")
-    const preview = calls.find((call) => call.url.endsWith("/preview"))
+    const preview = calls.filter((call) => call.url.endsWith("/preview")).at(-1)
     if (!preview?.init?.body) throw new Error("Controller did not preflight the preparation output")
     expect(JSON.parse(String(preview.init.body))).toMatchObject({
       dataset: "output-command",

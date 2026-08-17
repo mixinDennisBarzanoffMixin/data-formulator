@@ -362,7 +362,7 @@ export type StudioCatalog = Readonly<Omit<WireCatalog, "sheets"> & {
   }>[]
 }>
 
-export type StudioAction = "open" | "apply" | "rebind" | "prepare" | "profile" | "preview" | "rows" | "insert" | "edit" |
+export type StudioAction = "open" | "apply" | "rebind" | "sample" | "prepare" | "profile" | "preview" | "rows" | "insert" | "edit" |
   "remove" | "transform" | "publish" | "writeback" | "reconcile" | "resolve" | "cancel" | "export"
 
 export type StudioGate = Readonly<{ enabled: true } | { enabled: false; reason: string }>
@@ -396,6 +396,7 @@ export type StudioState = Readonly<{
   transform?: StudioTransform
   datasets: readonly Dataset[]
   profile?: Profile
+  sample?: StudioPreview
   preview?: StudioPreview
   issues: readonly StudioIssue[]
   quota?: Quota
