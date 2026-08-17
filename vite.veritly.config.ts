@@ -24,6 +24,7 @@ export default defineConfig({
     },
   ],
   resolve: { alias: { "@": path.resolve(__dirname, "./src") } },
+  optimizeDeps: { entries: [path.resolve(__dirname, "veritly.html")] },
   build: {
     outDir: path.join(__dirname, "dist-veritly"),
     emptyOutDir: true,
