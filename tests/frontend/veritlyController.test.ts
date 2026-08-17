@@ -6,6 +6,75 @@ beforeAll(() => {
 })
 
 describe("Veritly preparation controller", () => {
+  test("projects every workbook source and PostgreSQL target without inventing row cardinality", async () => {
+    const model = await import("../../src/veritly/model")
+    const protocol = await import("../../src/veritly/protocol")
+    const value = model.graph(protocol.Mapping.parse({
+      prep: "recipe",
+      version: 3,
+      state: "ready",
+      source: { kind: "workbook", file: "orders", path: "Orders.xlsx", revision: 4 },
+      sources: [{
+        command: "orders-source",
+        dataset: "orders",
+        file: "orders",
+        path: "Orders.xlsx",
+        revision: 4,
+        sheet: "Orders",
+        range: { header: 1, start: 2, end: 100, left: 1, right: 4 },
+      }, {
+        command: "customers-source",
+        dataset: "customers",
+        file: "customers",
+        path: "Customers.xlsx",
+        revision: 2,
+        sheet: "Customers",
+        range: { header: 2, start: 3, end: 40, left: 2, right: 5 },
+      }],
+      targets: [{
+        command: "entity-output",
+        input: "orders-keyed",
+        schema: "sales_abcd1234",
+        table: "orders",
+        class: "entity",
+        rows: "one_to_one",
+        identity: { strategy: "generated", column: "Veritly ID" },
+        columns: [{
+          target: "Veritly ID",
+          owner: "workbook",
+          key: true,
+          direction: "workbook_to_database",
+          transforms: ["orders-key"],
+        }],
+        invertible: true,
+        blockers: [],
+      }, {
+        command: "summary-output",
+        input: "joined-summary",
+        schema: "sales_abcd1234",
+        table: "customer_summary",
+        class: "derived",
+        rows: "derived",
+        identity: { strategy: "none" },
+        columns: [{
+          target: "Revenue",
+          type: "decimal",
+          owner: "derived",
+          key: false,
+          direction: "read_only",
+          transforms: ["join", "pivot"],
+        }],
+        invertible: false,
+        blockers: [{ kind: "derived_output", command: "summary-output", message: "Derived outputs do not write back" }],
+      }],
+    }), "summary-output")
+
+    expect(value.sources.map((source) => source.sheet)).toEqual(["Orders", "Customers"])
+    expect(value.targets.map((target) => target.table)).toEqual(["orders", "customer_summary"])
+    expect(value.target).toMatchObject({ command: "summary-output", rows: "derived", invertible: false })
+    expect(Object.isFrozen(value.targets[1]?.columns)).toBe(true)
+  })
+
   test("opens an undetected worksheet as an editable manual range", async () => {
     const model = await import("../../src/veritly/model")
     const book = model.catalog({
@@ -614,6 +683,16 @@ describe("Veritly preparation controller", () => {
     expect(stored.edit.enabled).toBe(true)
     expect(transient.transform.enabled).toBe(true)
     expect(model.gates({ ...base, preview: { dataset: "source-rows", columns: [], rows: [], total: 1, truncated: false } }).transform.enabled).toBe(false)
+    expect(model.gates({
+      ...base,
+      issues: [{ id: "issue", prep: "recipe", code: "sync_conflict", severity: "error", message: "Amount differs", state: "open", version: 0 }],
+      preview: { dataset: "stored", columns: [], rows: [], total: 1, truncated: false },
+    }).publish).toEqual({ enabled: false, reason: "Resolve blocking diagnostics before publication" })
+    expect(model.gates({
+      ...base,
+      issues: [{ id: "issue", prep: "recipe", code: "sync_conflict", severity: "error", message: "Amount differs", state: "resolved", version: 1 }],
+      preview: { dataset: "stored", columns: [], rows: [], total: 1, truncated: false },
+    }).publish.enabled).toBe(true)
   })
 })
 

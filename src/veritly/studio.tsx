@@ -48,17 +48,18 @@ import { DataGrid, type GridColDef, type GridValidRowModel } from "@mui/x-data-g
 import React, { useCallback, useEffect, useMemo, useSyncExternalStore } from "react"
 import { z } from "zod"
 import { PrepStudio, studio } from "./controller"
-import { output as recipeOutput } from "./model"
+import { graph, output as recipeOutput } from "./model"
 import type {
   Command,
   PrepConfig,
   PrepRecipe,
   StudioGate,
+  StudioIssue,
   StudioPreview as Preview,
   StudioState,
   StudioTransform,
 } from "./model"
-import type { Profile, Row } from "./protocol"
+import type { Mapping as WireMapping, Profile, Row } from "./protocol"
 
 type GridRow = GridValidRowModel & {
   _veritly_id: string
@@ -605,52 +606,62 @@ function Sample({ state, sample }: { state: StudioState; sample: Preview }) {
 }
 
 function Mapping({ model, state }: ViewProps) {
-  const recipe = state.recipe
-  const target = recipe ? recipeOutput(recipe) : undefined
-  const source = recipe?.commands.find((item) => item.kind === "source")
-  if (!recipe || !target || !source || source.kind !== "source") {
+  const mapped = state.mapping ? graph(state.mapping, state.view.step) : undefined
+  const target = mapped?.target
+  if (!mapped || !target) {
     return <Empty title="No mapping yet" detail="Choose and analyze a workbook region to create the row and column mapping." />
   }
-  const mapped = state.mapping?.targets.find((item) => item.command === target.id)
-  const columns = mapped
-    ? mapped.columns.map((column) => ({
-      id: column.target,
-      source: column.source,
-      target: column.target,
-      type: column.type,
-      owner: column.owner,
-      key: column.key,
-      direction: column.direction,
-    }))
-    : state.preview
-      ? state.preview.columns.filter((item) => !item.system).map((column) => ({
-        id: column.id,
-        source: column.name,
-        target: column.name,
-        type: column.type,
-        owner: column.owner,
-        key: Boolean(column.key),
-        direction: column.owner === "formula" || column.owner === "derived" ? "read_only" as const : "bidirectional" as const,
-      }))
-      : []
   return (
     <Box className="mapping">
       <Box className="mapping-head">
-        <NodeCard icon={<TableChartIcon />} eyebrow="XLSX SOURCE" title={source.sheet} detail={`${letters(source.range.left)}${source.range.header}:${letters(source.range.right)}${source.range.end}`} />
-        <Box className="mapping-flow"><ArrowForwardIcon /><Typography fontSize={10}>1 source row = 1 entity row</Typography></Box>
-        <NodeCard icon={<StorageIcon />} eyebrow="POSTGRESQL TARGET" title={`${target.schema}.${target.table}`} detail={`${target.class} table`} />
+        <Box className="mapping-nodes">
+          <Typography className="mapping-group">SOURCES · {mapped.sources.length}</Typography>
+          {mapped.sources.map((source) => (
+            <NodeCard
+              key={source.command}
+              icon={<TableChartIcon />}
+              eyebrow="XLSX SOURCE"
+              title={`${name(source.path)} · ${source.sheet}`}
+              detail={`${letters(source.range.left)}${source.range.header}:${letters(source.range.right)}${source.range.end} · r${source.revision}`}
+            />
+          ))}
+        </Box>
+        <Box className="mapping-flow"><ArrowForwardIcon /><Typography fontSize={10}>{cardinality(target.rows)}</Typography></Box>
+        <Box className="mapping-nodes">
+          <Typography className="mapping-group">TARGETS · {mapped.targets.length}</Typography>
+          {mapped.targets.map((item) => (
+            <button
+              className={`mapping-choice${item.command === target.command ? " selected" : ""}`}
+              key={item.command}
+              type="button"
+              onClick={() => model.view({ surface: "map", step: item.command, dataset: item.input })}
+            >
+              <NodeCard
+                icon={<StorageIcon />}
+                eyebrow="POSTGRESQL TARGET"
+                title={`${item.schema}.${item.table}`}
+                detail={`${label(item.class)} · ${cardinality(item.rows)}`}
+              />
+            </button>
+          ))}
+        </Box>
       </Box>
       <Box className="mapping-table">
         <Box className="mapping-row mapping-labels">
           <Typography>Workbook column</Typography><Typography>Transform</Typography><Typography>PostgreSQL column</Typography><Typography>Ownership</Typography>
         </Box>
-        {columns.map((column) => (
-          <Box className="mapping-row" key={column.id}>
+        {target.columns.map((column) => (
+          <Box className="mapping-row" key={column.target}>
             <Stack direction="row" alignItems="center" gap={1} minWidth={0}>
               {column.key ? <KeyIcon color="primary" fontSize="small" /> : <Typography className="type-glyph">{glyph(column.type ? column.type : "text")}</Typography>}
               <Typography fontSize={11} fontWeight={600} noWrap>{column.source ? column.source : "Generated"}</Typography>
             </Stack>
-            <Stack direction="row" alignItems="center" gap={0.5}><Divider sx={{ flex: 1 }} /><ArrowForwardIcon color="disabled" fontSize="small" /><Divider sx={{ flex: 1 }} /></Stack>
+            <Stack direction="row" alignItems="center" gap={0.5}>
+              <Divider sx={{ flex: 1 }} />
+              <Typography color="text.secondary" fontSize={8} noWrap>{column.transforms.length ? `${column.transforms.length} steps` : "Direct"}</Typography>
+              <ArrowForwardIcon color="disabled" fontSize="small" />
+              <Divider sx={{ flex: 1 }} />
+            </Stack>
             <Stack direction="row" alignItems="center" gap={1} minWidth={0}>
               <Typography className="type-glyph">{glyph(column.type ? column.type : "text")}</Typography>
               <Typography fontSize={11} fontWeight={600} noWrap>{column.target}</Typography>
@@ -662,14 +673,14 @@ function Mapping({ model, state }: ViewProps) {
             </Stack>
           </Box>
         ))}
-        {!columns.length && <Box p={3}><Typography color="text.secondary" fontSize={11}>Load the preview to inspect typed column mappings.</Typography></Box>}
+        {!target.columns.length && <Box p={3}><Typography color="text.secondary" fontSize={11}>This target has no mapped columns.</Typography></Box>}
       </Box>
       <Box className="mapping-note">
-        {mapped?.invertible === false ? <ErrorOutlineIcon color="warning" fontSize="small" /> : <KeyIcon color="primary" fontSize="small" />}
+        {!target.invertible ? <ErrorOutlineIcon color="warning" fontSize="small" /> : <KeyIcon color="primary" fontSize="small" />}
         <Typography fontSize={11}>
-          {mapped?.invertible === false
-            ? mapped.blockers.map((blocker) => blocker.message).join(" · ")
-            : target.keys.length ? `Row identity: ${target.keys.join(", ")}` : "Row identity is not configured"}
+          {!target.invertible
+            ? target.blockers.map((blocker) => blocker.message).join(" · ")
+            : `Row identity: ${identity(target)}`}
         </Typography>
         <Button startIcon={<AutoFixHighIcon />} onClick={() => model.ai("configure")}>Change with AI</Button>
       </Box>
@@ -678,27 +689,33 @@ function Mapping({ model, state }: ViewProps) {
 }
 
 function Model({ state }: { state: StudioState }) {
-  const recipe = state.recipe
-  const target = recipe ? recipeOutput(recipe) : undefined
-  const dataset = state.datasets.find((item) => item.prep === recipe?.id)
-  if (!recipe || !target) return <Empty title="No model yet" detail="Analyze a source before modeling tables and relationships." />
-  const columns = dataset ? dataset.columns : state.preview ? state.preview.columns : []
+  const mapped = state.mapping ? graph(state.mapping, state.view.step) : undefined
+  if (!mapped?.targets.length) return <Empty title="No model yet" detail="Analyze a source before modeling tables and relationships." />
   return (
     <Box className="model-canvas">
-      <Box className="model-table">
-        <Box className="model-title"><StorageIcon /><Typography fontSize={12} fontWeight={700}>{target.schema}.{target.table}</Typography><Chip size="small" label={target.class} /></Box>
-        {columns.filter((item) => !item.system).map((column) => (
-          <Box className="model-column" key={column.id}>
-            {target.keys.includes(column.name) ? <KeyIcon color="primary" fontSize="small" /> : <Typography className="type-glyph">{glyph(column.type)}</Typography>}
-            <Typography fontSize={11} flex={1} noWrap>{column.name}</Typography>
-            <Typography color="text.secondary" fontSize={9}>{label(column.type)}</Typography>
+      {mapped.targets.map((target) => {
+        const dataset = state.datasets.find((item) => item.schema === target.schema && item.table === target.table)
+        const columns = dataset
+          ? dataset.columns.filter((column) => !column.system).map((column) => ({ name: column.name, type: column.type, key: Boolean(column.key) }))
+          : target.columns.map((column) => ({ name: column.target, type: column.type ? column.type : "text", key: column.key }))
+        return (
+          <Box className="model-table" key={target.command}>
+            <Box className="model-title"><StorageIcon /><Typography fontSize={12} fontWeight={700}>{target.schema}.{target.table}</Typography><Chip size="small" label={target.class} /></Box>
+            {columns.map((column) => (
+              <Box className="model-column" key={column.name}>
+                {column.key ? <KeyIcon color="primary" fontSize="small" /> : <Typography className="type-glyph">{glyph(column.type)}</Typography>}
+                <Typography fontSize={11} flex={1} noWrap>{column.name}</Typography>
+                <Typography color="text.secondary" fontSize={9}>{label(column.type)}</Typography>
+              </Box>
+            ))}
+            <Box className="model-meta"><Typography fontSize={9}>{cardinality(target.rows)} · {target.invertible ? "Write-back enabled" : "Read-only output"}</Typography></Box>
           </Box>
-        ))}
-      </Box>
+        )
+      })}
       <Box className="model-empty">
         <AccountTreeIcon color="disabled" sx={{ fontSize: 46 }} />
-        <Typography fontSize={13} fontWeight={650}>One row-level entity table</Typography>
-        <Typography color="text.secondary" fontSize={11}>Joins and derived tables appear here without replacing the original transaction rows.</Typography>
+        <Typography fontSize={13} fontWeight={650}>{mapped.sources.length} sources · {mapped.targets.length} targets</Typography>
+        <Typography color="text.secondary" fontSize={11}>Derived tables remain separate from original row-level entity outputs.</Typography>
       </Box>
     </Box>
   )
@@ -709,11 +726,12 @@ function Review({ state }: { state: StudioState }) {
   const target = recipe ? recipeOutput(recipe) : undefined
   const source = recipe?.commands.find((item) => item.kind === "source")
   if (!recipe || !target || !source || source.kind !== "source") return <Empty title="Nothing to review" detail="Analyze a workbook range first." />
+  const issues = state.issues.filter((issue) => issue.state === "open")
   const checks = [
     { title: "Bounded workbook range", detail: `${source.sheet}!${letters(source.range.left)}${source.range.header}:${letters(source.range.right)}${source.range.end}`, ok: true },
     { title: "Row identity", detail: target.keys.join(", "), ok: target.keys.length > 0 },
     { title: "Typed row preview", detail: state.preview ? `${state.preview.total.toLocaleString()} rows · ${state.preview.columns.length} columns` : "Not loaded", ok: Boolean(state.preview) },
-    { title: "Diagnostics", detail: state.issues.length ? `${state.issues.length} open issues` : "No blocking issues", ok: !state.issues.some((item) => item.severity === "error") },
+    { title: "Diagnostics", detail: issues.length ? `${issues.length} open issues` : "No blocking issues", ok: !issues.some((item) => item.severity === "error") },
   ]
   return (
     <Box className="review">
@@ -915,6 +933,7 @@ function Field({ label: title, children }: { label: string; children: React.Reac
 }
 
 function Details({ model, state }: ViewProps) {
+  const issues = state.issues.filter((issue) => issue.state === "open").length
   return (
     <Box className="details">
       <Tabs
@@ -923,11 +942,11 @@ function Details({ model, state }: ViewProps) {
         onChange={(_, value: StudioState["view"]["detail"]) => model.view({ detail: value })}
       >
         <Tab value="profile" label="Column profile" />
-        <Tab value="issues" label={`Issues (${state.issues.length})`} />
+        <Tab value="issues" label={`Issues (${issues})`} />
         <Tab value="jobs" label="Job" />
       </Tabs>
       <Box className="details-body">
-        {state.draft && state.preview ? <Draft model={model} state={state} /> : detail(state)}
+        {state.draft && state.preview ? <Draft model={model} state={state} /> : detail(model, state)}
       </Box>
     </Box>
   )
@@ -1024,7 +1043,7 @@ function Column({ name: title, type, profile }: { name: string; type: string; pr
   )
 }
 
-function detail(state: StudioState) {
+function detail(model: PrepStudio, state: StudioState) {
   if (state.view.detail === "issues") {
     if (!state.issues.length) return <Typography color="text.secondary" fontSize={11}>No open diagnostics.</Typography>
     return (
@@ -1032,8 +1051,10 @@ function detail(state: StudioState) {
         {state.issues.map((issue) => (
           <Stack key={issue.id} direction="row" alignItems="center" gap={1}>
             <ErrorOutlineIcon color={issue.severity === "error" ? "error" : "warning"} fontSize="small" />
-            <Typography fontSize={11}>{issue.message}</Typography>
+            <Typography fontSize={11} flex={1}>{issue.message}</Typography>
             {issue.column && <Chip size="small" label={issue.column} />}
+            {issue.state === "resolved" && <Chip size="small" color="success" label="Resolved" />}
+            {issue.state === "open" && issue.code === "sync_conflict" && <IssueActions model={model} issue={issue} />}
           </Stack>
         ))}
       </Stack>
@@ -1060,6 +1081,23 @@ function detail(state: StudioState) {
         <Chip key={column.column} size="small" variant="outlined" label={`${column.column}: ${column.type} · ${column.nulls} empty · ${column.distinct} distinct`} />
       ))}
     </Stack>
+  )
+}
+
+function IssueActions({ model, issue }: { model: PrepStudio; issue: StudioIssue }) {
+  return (
+    <ButtonGroup size="small" aria-label={`Resolve ${issue.message}`}>
+      <Button onClick={() => act(model.resolve({
+        issue: issue.id,
+        expectedVersion: issue.version,
+        decision: { kind: "source" },
+      }))}>Use workbook</Button>
+      <Button onClick={() => act(model.resolve({
+        issue: issue.id,
+        expectedVersion: issue.version,
+        decision: { kind: "database" },
+      }))}>Use database</Button>
+    </ButtonGroup>
   )
 }
 
@@ -1169,6 +1207,18 @@ function glyph(type: string) {
   if (type === "date" || type === "timestamp") return "▣"
   if (type === "boolean") return "T/F"
   return "ABC"
+}
+
+function cardinality(rows: WireMapping["targets"][number]["rows"]) {
+  if (rows === "one_to_one") return "1 source row → 1 entity row"
+  if (rows === "derived") return "Derived rows · no write-back"
+  return "Database-native rows"
+}
+
+function identity(target: Pick<WireMapping["targets"][number], "schema" | "table" | "identity">) {
+  if (target.identity.strategy === "generated") return target.identity.column
+  if (target.identity.strategy === "existing") return target.identity.columns.join(", ")
+  throw new Error(`Invertible target has no row identity: ${target.schema}.${target.table}`)
 }
 
 function name(path: string) {

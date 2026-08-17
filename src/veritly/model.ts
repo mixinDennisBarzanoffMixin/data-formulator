@@ -414,6 +414,18 @@ export type StudioPreview = Readonly<Omit<Preview, "columns" | "rows"> & {
   columns: readonly Preview["columns"][number][]
   rows: readonly Preview["rows"][number][]
 }>
+type StudioColumn = Readonly<Omit<Mapping["targets"][number]["columns"][number], "transforms"> & {
+  transforms: readonly string[]
+}>
+type StudioTarget = Readonly<Omit<Mapping["targets"][number], "columns" | "blockers"> & {
+  columns: readonly StudioColumn[]
+  blockers: readonly Readonly<Mapping["targets"][number]["blockers"][number]>[]
+}>
+export type StudioMap = Readonly<{
+  sources: readonly Readonly<Mapping["sources"][number]>[]
+  targets: readonly StudioTarget[]
+  target?: StudioTarget
+}>
 export type StudioQuota = Quota
 export type StudioJob = Job
 export type WireIssue = Issue
@@ -432,6 +444,20 @@ export function catalog(value: WireCatalog): StudioCatalog {
       regions: Object.freeze(sheet.regions.map((region) => Object.freeze({ ...region }))),
     }))),
   })
+}
+
+export function graph(value: Mapping, command?: string): StudioMap {
+  const sources = Object.freeze(value.sources.map((source) => Object.freeze({ ...source })))
+  const targets = Object.freeze(value.targets.map((target) => Object.freeze({
+    ...target,
+    columns: Object.freeze(target.columns.map((column) => Object.freeze({
+      ...column,
+      transforms: Object.freeze([...column.transforms]),
+    }))),
+    blockers: Object.freeze(target.blockers.map((blocker) => Object.freeze({ ...blocker }))),
+  })))
+  const target = targets.find((item) => item.command === command) || targets.at(-1)
+  return Object.freeze({ sources, targets, ...(target ? { target } : {}) })
 }
 
 export function config(value?: PrepRecipe): PrepConfig {
@@ -607,6 +633,8 @@ export function gates(value: Omit<StudioState, "gates">): StudioGates {
   const profiled = prep && value.view.dataset && prep.commands.some((item) =>
     ("output" in item && item.output === value.view.dataset) || (item.kind === "output" && item.id === value.view.dataset))
   const blocked = prep ? prep.commands.some((item) => ["split", "merge", "filter", "dedupe", "derive", "join", "union", "pivot", "unpivot", "code"].includes(item.kind)) : false
+  const issues = value.issues.filter((issue) => issue.state === "open")
+  const invalid = issues.some((issue) => issue.severity === "error")
   const rows = published && value.preview !== undefined && value.datasets.some((item) => item.id === value.preview?.dataset)
   const active = value.job && (value.job.state === "queued" || value.job.state === "running")
   return Object.freeze({
@@ -614,13 +642,13 @@ export function gates(value: Omit<StudioState, "gates">): StudioGates {
     rebind: value.busy ? idle : !prep ? block("Preparation is not loaded") : !workbook ? block("Native data has no workbook binding") : prep.state !== "draft" && prep.state !== "source_missing" ? block("Published data requires a new preparation before changing its workbook") : allow(),
     profile: value.busy ? idle : !profiled ? block("Select a recipe query to profile") : allow(),
     transform: value.busy ? idle : !prep ? block("Preparation is not loaded") : !target ? block("Preparation has no output") : !transformable ? block("Load the final query preview before adding a step") : allow(),
-    publish: value.busy ? idle : !prep ? block("Preparation is not loaded") : !ready ? block("Preparation is not writable") : !target ? block("Preparation has no output") : allow(),
+    publish: value.busy ? idle : !prep ? block("Preparation is not loaded") : !ready ? block("Preparation is not writable") : !target ? block("Preparation has no output") : invalid ? block("Resolve blocking diagnostics before publication") : allow(),
     writeback: value.busy ? idle : !workbook ? block("Write-back requires a workbook") : !published ? block("Publish before writing back") : blocked ? block("Recipe is not invertible") : allow(),
     reconcile: value.busy ? idle : !workbook ? block("Reconciliation requires a workbook") : !published ? block("Publish before reconciling") : blocked ? block("Recipe is not invertible") : allow(),
     insert: value.busy ? idle : !rows ? block("Publish and load database rows first") : allow(),
     edit: value.busy ? idle : !rows ? block("Publish and load database rows first") : allow(),
     remove: value.busy ? idle : !rows ? block("Publish and load database rows first") : allow(),
-    ai: value.issues.some((item) => item.state === "open") ? allow() : block("No open issues"),
+    ai: issues.length ? allow() : block("No open issues"),
     cancel: active ? allow() : block("No active job"),
     export: value.busy ? idle : !published ? block("Publish project data before exporting") : allow(),
   })

@@ -413,8 +413,39 @@ body,
 .mapping-head {
   display: grid;
   grid-template-columns: minmax(170px, 1fr) minmax(110px, .6fr) minmax(170px, 1fr);
-  align-items: center;
+  align-items: start;
   gap: 12px;
+}
+
+.mapping-nodes {
+  display: grid;
+  gap: 8px;
+}
+
+.mapping-group {
+  color: #6b686e;
+  font-size: 9px !important;
+  font-weight: 700 !important;
+  letter-spacing: .05em !important;
+}
+
+.mapping-choice {
+  padding: 0;
+  border: 0;
+  color: inherit;
+  text-align: left;
+  background: transparent;
+  cursor: pointer;
+}
+
+.mapping-choice .node-card {
+  width: 100%;
+}
+
+.mapping-choice:hover .node-card,
+.mapping-choice.selected .node-card {
+  border-color: #6750a4;
+  box-shadow: 0 0 0 1px #6750a4;
 }
 
 .node-card,
@@ -436,6 +467,7 @@ body,
   justify-content: center;
   color: #6750a4;
   text-align: center;
+  padding-top: 34px;
 }
 
 .mapping-table {
@@ -497,13 +529,20 @@ body,
 .model-canvas {
   position: relative;
   display: grid;
-  grid-template-columns: minmax(230px, 310px) minmax(180px, 1fr);
+  grid-template-columns: repeat(auto-fit, minmax(230px, 310px));
   align-items: start;
   padding: 28px;
   gap: 38px;
   background-color: #f6f6f6;
   background-image: radial-gradient(#d8d8d8 1px, transparent 1px);
   background-size: 18px 18px;
+}
+
+.model-meta {
+  padding: 7px 10px;
+  color: #6b686e;
+  border-top: 1px solid #ededed;
+  background: #fafafa;
 }
 
 .model-table {
